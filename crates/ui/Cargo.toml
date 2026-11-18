@@ -1,0 +1,18 @@
+[package]
+name = "redagent-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "redagent-ui"
+path = "src/main.rs"
+
+[dependencies]
+dioxus = { version = "0.7", features = ["native"] }
+reqwest = { version = "0.12", features = ["json"] }
+serde.workspace = true
+serde_json.workspace = true
+redagent-core = { path = "../core" }
+tokio = { version = "1", features = ["time"] }

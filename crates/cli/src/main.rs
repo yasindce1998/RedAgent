@@ -57,6 +57,19 @@ enum Command {
         #[arg(long, default_value = "redagent.db")]
         ledger: PathBuf,
     },
+    /// Start the REST/SSE control API for the desktop UI.
+    Serve {
+        #[arg(long, default_value = "127.0.0.1:8787")]
+        bind: String,
+        /// Directory holding engagement ledgers.
+        #[arg(long, default_value = ".")]
+        ledger_dir: PathBuf,
+        /// Path to the checksum-pinned RedHands binary.
+        #[arg(long)]
+        redhands: PathBuf,
+        #[arg(long, default_value_t = 300)]
+        approval_timeout_secs: u64,
+    },
 }
 
 fn resolve_llm_config(
@@ -122,6 +135,22 @@ fn main() -> Result<()> {
         Command::Verify { ledger } => {
             let count = Ledger::open(&ledger)?.verify_chain()?;
             println!("OK: {count} events, hash chain verified");
+        }
+        Command::Serve {
+            bind,
+            ledger_dir,
+            redhands,
+            approval_timeout_secs,
+        } => {
+            let bind = bind.parse::<std::net::SocketAddr>()?;
+            let config = redagent_api::ApiConfig {
+                bind,
+                ledger_dir,
+                redhands_binary: redhands,
+                approval_timeout: std::time::Duration::from_secs(approval_timeout_secs),
+            };
+            let runtime = tokio::runtime::Runtime::new()?;
+            runtime.block_on(redagent_api::serve(config))?;
         }
     }
     Ok(())
