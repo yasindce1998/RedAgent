@@ -1,93 +1,112 @@
+<div align="center">
+
+<img src="docs/logo.svg" alt="RedAgent logo" width="170" />
+
 # RedAgent
 
-Autonomous offensive-security agent for [RedHands](https://github.com/yasindce1998/RedHands).
+**Goal in. Evidence out.**
 
-RedHands is the **tool plane**: 294 typed MCP tools, approval policies, engagement
-scope, audit log and targetdb. RedAgent is the **control plane**: a planner, a
-typed event ledger, a guard and (from Phase 2) a Dioxus UI. The two planes are
-joined by one protocol boundary — MCP over stdio (local) or HTTP (remote). No
-FFI, no shared memory, no shared database.
+An autonomous offensive-security agent for [RedHands](https://github.com/yasindce1998/RedHands) — the tool plane that already wraps 294 security tools behind approval policies, scope gates and a full audit trail.
 
-No code from ARTEX is used. It is a reference for *ideas only*. All code here is
-original and MIT licensed.
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Built in Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](Cargo.toml)
+[![CI](https://github.com/yasindce1998/RedAgent/actions/workflows/ci.yml/badge.svg)](https://github.com/yasindce1998/RedAgent/actions/workflows/ci.yml)
+[![Phase 0](https://img.shields.io/badge/phase-0%20shipped-brightgreen.svg)](#roadmap)
+[![RedHands contract](https://img.shields.io/badge/RedHands-v0.6.3-red.svg)](#quick-start)
 
-## Current status — Phase 0
+</div>
 
-Working loop:
+---
 
-```
-goal → deterministic intent → guard allowlist → RedHands MCP tools/call
-     → hash-chained ledger events → Markdown report
-```
+## MCP gives you tools. RedAgent gives them a brain.
 
-The Phase 0 planner is deliberately deterministic (`redhands_health`). It
-exists to prove the architecture end to end; a schema-validated LLM planner
-implements the same `Planner` trait in Phase 1.
+RedHands exposes capabilities. RedAgent decides **what to try next**, remembers what happened two steps ago, and binds every conclusion to the tool output that produced it. No shell free-for-all, no orphaned findings, no "what did the agent actually do?" moments.
 
-## Architecture
-
-See [docs/adr/0001-architecture.md](docs/adr/0001-architecture.md) for the
-decision record. Short version:
-
-- **Go stays in RedHands**, unchanged.
-- **Rust owns the agent**, eventually compiled into one binary with the UI.
-- **MCP is the only seam** between the two.
-- **One append-only SQLite ledger** is the source of truth; graphs, coverage,
-  findings and audit views are projections, never independently mutated.
-- Every target action is a typed `tools/call` — no free-form shell.
-
-### Crates
-
-| Crate | Responsibility |
+| | |
 |---|---|
-| `redagent-core` | Event ledger (hash-chained), typed events, projections, report rendering |
-| `redagent-mcp` | Minimal synchronous MCP client over stdio; JSON-RPC 2.0 |
-| `redagent-agent` | `Planner` trait + Phase 0 deterministic planner |
-| `redagent-guard` | Tool allowlist + hard tool-call budget |
-| `redagent-app` | Single wiring point and the engagement engine |
-| `redagent-cli` | `redagent run / report / verify` |
-| `fake-mcp-server` | Test-only deterministic MCP server (workspace test binary) |
+| 🎯 **Goal-driven** | Describe the objective, not the command sequence. Typed intents replace brittle click-paths. |
+| 🔗 **MCP-native execution** | Every action is a structured `tools/call` to RedHands — the same argv validation, approval policy and engagement scope operators already trust. |
+| 🧾 **Receipts by default** | An append-only, hash-chained ledger records each intent, guard decision, tool result and finding. Reports are projections — audit is not an afterthought. |
+| 🛡️ **Guardrails in code** | Allowlists and hard budgets are enforced before a call leaves the process, not hoped for in a prompt. |
+| ⚡ **Two planes, one binary** | Go stays where it shines (the tool plane); Rust owns the control plane and, from Phase 2, the Dioxus UI. One protocol between them: MCP. |
 
-## Build and test
+> **Status:** Phase 0 foundation is shipped and tested end to end. The planner is deterministic today; a schema-validated LLM planner plugs into the same trait in Phase 1.
 
-```sh
-cargo build --release            # produces target/release/redagent
-cargo test --workspace --all-targets
-cargo clippy --workspace --all-targets -- -D warnings
-cargo fmt --all -- --check
+## How it works
+
+```
+        goal
+          │
+          ▼
+   ┌─────────────┐     ┌──────────┐     ┌──────────────────┐
+   │ planner     │────▶│ guard    │────▶│ RedHands via MCP │
+   │ typed intent│     │ allowlist│     │ stdio or HTTP    │
+   └─────────────┘     │ budget   │     └────────┬─────────┘
+                       └──────────┘              │ tool result
+          ▲                                     ▼
+          │            ┌───────────────────────────────┐
+          └────────────│  hash-chained event ledger    │
+             re-plan   │  → findings → Markdown report │
+                       └───────────────────────────────┘
 ```
 
-CI runs format, clippy, tests and a release build on Linux, macOS and Windows.
+## Quick start
 
-## Usage
-
-Requires a **checksum-verified RedHands v0.6.3** binary (the contract version
-for Phase 0):
+Requires Rust stable and a checksum-verified **RedHands v0.6.3** binary (the pinned contract version).
 
 ```sh
-redagent run "verify the lab tool plane" \
+cargo build --release
+
+./target/release/redagent run "verify the lab tool plane" \
   --redhands /path/to/redhands \
   --ledger engagement.db
 
-redagent report --ledger engagement.db        # re-render the Markdown report
-redagent verify --ledger engagement.db        # verify the hash chain
+./target/release/redagent report  --ledger engagement.db   # re-render findings
+./target/release/redagent verify  --ledger engagement.db   # check the hash chain
 ```
 
-`run` spawns RedHands in stdio mode with `REDHANDS_TOOLSETS=health`,
-`REDHANDS_AUTH=none` and every state directory redirected next to the ledger —
-so no files are written to your working directory. The tool catalog, guard
-decision, tool output and finding are all recorded as events in the ledger.
+The engine spawns RedHands over stdio with a minimal toolset and redirects every state directory next to the ledger — your working directory stays clean, and the resulting `.db` is a portable, verifiable engagement record.
+
+## Built different
+
+- **No copied code, no license contamination.** ARTEX was studied as a reference, not forked. RedAgent is clean-room, MIT, and yours.
+- **No FFI, no sidecar services, no database server.** Two processes, one protocol, one Cargo.lock.
+- **No hidden state.** Graphs, coverage and findings are projections of immutable events — replay, verify and export them at any time.
+- **Operator-first safety.** Approved-tool gating lives in RedHands; RedAgent never gains a path around it. Authorized engagements only.
+
+## Architecture
+
+See [ADR 0001](docs/adr/0001-architecture.md) for the full decision record.
+
+| Crate | Role |
+|---|---|
+| `redagent-core` | Event ledger, hash chain, projections, report rendering |
+| `redagent-mcp` | Minimal dual-era MCP stdio client + test server |
+| `redagent-agent` | `Planner` trait and the Phase 0 deterministic planner |
+| `redagent-guard` | Tool allowlist and call budget |
+| `redagent-app` | The single wiring point |
+| `redagent-cli` | `run` / `report` / `verify` |
+
+CI runs format, clippy, tests and release builds on Linux, macOS and Windows, plus a **live-e2e job** that downloads RedHands v0.6.3 with its published SHA-256 and drives the complete loop against the real Go server.
 
 ## Roadmap
 
 | Phase | Deliverable | Status |
 |---|---|---|
-| 0 | Ledger, typed intent, MCP loop, guard, CLI, CI | ✅ this release |
+| 0 | Ledger, typed intent, MCP loop, guard, CLI, CI | ✅ shipped |
 | 1 | LLM planner, worker/verifier, approval elicitation, budgets | next |
 | 2 | Dioxus desktop UI + Axum REST/SSE projections | planned |
 | 3 | Evidence blobs, retest loop, exports, Dioxus WASM web console | planned |
 | 4 | RBAC/KMS, OTel, WASM plugins (only if measured) | planned |
 
-## License
+## Legal & license
 
 MIT — Copyright (c) 2026 Mohammed Yasin. See [LICENSE](LICENSE).
+
+RedAgent is an offensive-security tool. Use it only against systems you own or are explicitly authorized to test.
+
+<div align="center">
+
+**RedHands finds the tools. RedAgent finds the path.**
+
+</div>
