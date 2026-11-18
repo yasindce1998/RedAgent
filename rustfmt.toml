@@ -1,5 +1,0 @@
-# Preserve the existing import ordering across the workspace. The Phase 2 core
-# projections module was committed with `use crate::...` before external crates;
-# disabling reordering keeps `cargo fmt --all -- --check` green without touching
-# crates outside the Phase 2 UI work.
-reorder_imports = false
