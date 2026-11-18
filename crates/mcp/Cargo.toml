@@ -1,0 +1,15 @@
+[package]
+name = "redagent-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[[bin]]
+name = "fake-mcp-server"
+path = "tests/support/fake_server.rs"

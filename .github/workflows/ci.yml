@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace --all-targets
+      - name: Release build
+        run: cargo build --release --workspace
+
+  live-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+      - name: Download checksum-pinned RedHands v0.6.3
+        run: |
+          curl -fsSL -o redhands.tar.gz \
+            https://github.com/yasindce1998/RedHands/releases/download/v0.6.3/redhands_0.6.3_linux_amd64.tar.gz
+          echo "65acdd122ddfa8c1f1cf556909b35f91b5a60d7774e94d3826013933b2cb924c  redhands.tar.gz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/redhands"
+          tar xzf redhands.tar.gz -C "$RUNNER_TEMP/redhands"
+      - name: Run the full loop against the real Go server
+        run: |
+          cargo build --release -p redagent-cli
+          mkdir -p "$RUNNER_TEMP/engagement"
+          ./target/release/redagent run "verify the lab tool plane" \
+            --redhands "$RUNNER_TEMP/redhands/redhands" \
+            --ledger "$RUNNER_TEMP/engagement/engagement.db" > "$RUNNER_TEMP/report.md"
+          grep -q "Status: OK" "$RUNNER_TEMP/report.md"
+          ./target/release/redagent verify --ledger "$RUNNER_TEMP/engagement/engagement.db"
