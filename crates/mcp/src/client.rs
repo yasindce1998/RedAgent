@@ -28,6 +28,11 @@ pub struct ToolInfo {
 pub struct ToolCallResult {
     pub content: String,
     pub is_error: bool,
+    /// Extended result shape, e.g. `"input_required"` when a gated tool
+    /// pauses the call pending operator approval.
+    pub result_type: Option<String>,
+    /// Elicitation requests keyed by input name (e.g. `"approval"`).
+    pub input_requests: Option<serde_json::Value>,
 }
 
 /// A synchronous MCP client over a child process' stdio pipes.
@@ -120,11 +125,35 @@ impl StdioMcpClient {
     }
 
     pub fn tools_call(&mut self, name: &str, arguments: Value) -> Result<ToolCallResult> {
-        let result = self.request("tools/call", json!({"name": name, "arguments": arguments}))?;
+        self.tools_call_with_responses(name, arguments, None)
+    }
+
+    /// Issue a `tools/call`, optionally answering inline elicitation requests.
+    ///
+    /// RedHands returns gated-tool approvals inline (no server-initiated
+    /// request): the first call carries `resultType: "input_required"` and an
+    /// `inputRequests` map. Re-issuing the same call with the matching
+    /// `inputResponses` grants approval for that one call only.
+    pub fn tools_call_with_responses(
+        &mut self,
+        name: &str,
+        arguments: Value,
+        input_responses: Option<Value>,
+    ) -> Result<ToolCallResult> {
+        let mut params = json!({"name": name, "arguments": arguments});
+        if let Some(responses) = input_responses {
+            params["inputResponses"] = responses;
+        }
+        let result = self.request("tools/call", params)?;
         let is_error = result
             .get("isError")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        let result_type = result
+            .get("resultType")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let input_requests = result.get("inputRequests").cloned();
         let mut content = String::new();
         if let Some(blocks) = result.get("content").and_then(Value::as_array) {
             for block in blocks {
@@ -136,7 +165,12 @@ impl StdioMcpClient {
                 }
             }
         }
-        Ok(ToolCallResult { content, is_error })
+        Ok(ToolCallResult {
+            content,
+            is_error,
+            result_type,
+            input_requests,
+        })
     }
 
     fn notify(&mut self, method: &str, params: Value) -> Result<()> {

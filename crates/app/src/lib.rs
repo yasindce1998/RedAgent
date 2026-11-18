@@ -199,6 +199,8 @@ mod tests {
             Ok(ToolCallResult {
                 content: "### Status: OK".to_string(),
                 is_error: false,
+                result_type: None,
+                input_requests: None,
             })
         }
     }

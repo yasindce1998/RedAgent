@@ -48,12 +48,41 @@ fn main() {
                 }]
             }),
             "tools/call" => {
-                let name = message
-                    .get("params")
+                let params = message.get("params");
+                let name = params
                     .and_then(|p| p.get("name"))
                     .and_then(Value::as_str)
                     .unwrap_or("");
-                if name != "redhands_health" {
+                if name == "gated_echo" {
+                    let approved = params
+                        .and_then(|p| p.get("inputResponses"))
+                        .and_then(|r| r.get("approval"))
+                        .and_then(|a| a.get("approved"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    if approved {
+                        json!({
+                            "content": [{"type": "text", "text": "approved"}],
+                            "isError": false
+                        })
+                    } else {
+                        json!({
+                            "content": [{
+                                "type": "text",
+                                "text": "requires operator approval"
+                            }],
+                            "isError": false,
+                            "resultType": "input_required",
+                            "inputRequests": {
+                                "approval": {
+                                    "type": "elicitation/create",
+                                    "message": "Approve gated_echo?",
+                                    "requestId": "req_test"
+                                }
+                            }
+                        })
+                    }
+                } else if name != "redhands_health" {
                     let response = json!({
                         "jsonrpc": "2.0",
                         "id": id,
@@ -62,14 +91,15 @@ fn main() {
                     let _ = writeln!(stdout, "{}", response);
                     let _ = stdout.flush();
                     continue;
+                } else {
+                    json!({
+                        "content": [{
+                            "type": "text",
+                            "text": "## RedHands Health Check\n\n### Status: OK\n"
+                        }],
+                        "isError": false
+                    })
                 }
-                json!({
-                    "content": [{
-                        "type": "text",
-                        "text": "## RedHands Health Check\n\n### Status: OK\n"
-                    }],
-                    "isError": false
-                })
             }
             _ => {
                 let response = json!({
