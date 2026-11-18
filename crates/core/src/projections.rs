@@ -1,6 +1,7 @@
+use serde::{Deserialize, Serialize};
 use crate::events::{EventBody, StoredEvent};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IntentView {
     pub id: String,
     pub title: String,
@@ -9,7 +10,7 @@ pub struct IntentView {
     pub reason: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallView {
     pub intent_id: String,
     pub tool: String,
@@ -17,7 +18,7 @@ pub struct ToolCallView {
     pub is_error: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FindingView {
     pub id: String,
     pub title: String,
@@ -25,7 +26,7 @@ pub struct FindingView {
     pub evidence_seq: i64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApprovalView {
     pub intent_id: String,
     pub tool: String,
@@ -34,7 +35,7 @@ pub struct ApprovalView {
     pub decided_by: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerificationView {
     pub finding_id: String,
     pub verdict: String,
@@ -42,7 +43,7 @@ pub struct VerificationView {
 }
 
 /// Read-only view over the ledger. Rebuilt from events on demand.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct EngagementView {
     pub goal: Option<String>,
     pub redhands_version: Option<String>,
