@@ -81,7 +81,10 @@ impl Config {
         self
     }
 
-    pub fn with_allowed_tools(mut self, tools: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn with_allowed_tools(
+        mut self,
+        tools: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
         self.allowed_tools = tools.into_iter().map(Into::into).collect();
         self
     }
@@ -225,7 +228,7 @@ pub fn run(config: &Config) -> Result<EngagementView> {
     run_with(config, &HeuristicVerifier, handler)
 }
 
-pub fn run_with<V: Verifier, A: ApprovalHandler>(
+pub fn run_with<V: Verifier, A: ApprovalHandler + ?Sized>(
     config: &Config,
     verifier: &V,
     approvals: &A,
@@ -234,7 +237,7 @@ pub fn run_with<V: Verifier, A: ApprovalHandler>(
     run_with_executor(config, verifier, approvals, &mut executor)
 }
 
-pub fn run_with_executor<V: Verifier, A: ApprovalHandler, E: ToolExecutor>(
+pub fn run_with_executor<V: Verifier, A: ApprovalHandler + ?Sized, E: ToolExecutor>(
     config: &Config,
     verifier: &V,
     approvals: &A,
@@ -265,12 +268,14 @@ fn make_planner(config: &Config) -> Result<Box<dyn Planner>> {
                 .as_ref()
                 .ok_or_else(|| anyhow!("LLM planner requested but no LLM config supplied"))?;
             let client = LlmClient::new(&llm.base_url, &llm.api_key, &llm.model);
-            Ok(Box::new(LlmPlanner::new(client).with_max_intents(config.max_intents)))
+            Ok(Box::new(
+                LlmPlanner::new(client).with_max_intents(config.max_intents),
+            ))
         }
     }
 }
 
-fn execute<V: Verifier, A: ApprovalHandler, E: ToolExecutor>(
+fn execute<V: Verifier, A: ApprovalHandler + ?Sized, E: ToolExecutor>(
     config: &Config,
     ledger: &Ledger,
     executor: &mut E,
@@ -283,9 +288,8 @@ fn execute<V: Verifier, A: ApprovalHandler, E: ToolExecutor>(
     let intents = planner.plan(&config.goal, &available)?;
     let policy = Policy::new(config.allowed_tools.clone(), config.max_tool_calls);
     let mut findings = 0usize;
-    let mut calls_made = 0usize;
 
-    for intent in &intents {
+    for (calls_made, intent) in intents.iter().enumerate() {
         ledger.append(&EventBody::IntentCreated {
             id: intent.id.clone(),
             title: intent.title.clone(),
@@ -354,8 +358,6 @@ fn execute<V: Verifier, A: ApprovalHandler, E: ToolExecutor>(
         if call.is_error {
             return Err(anyhow!("tool '{}' reported an error", intent.tool));
         }
-        calls_made += 1;
-
         let finding_id = format!("finding-{}", findings + 1);
         ledger.append(&EventBody::FindingRecorded {
             id: finding_id.clone(),
@@ -378,7 +380,9 @@ fn execute<V: Verifier, A: ApprovalHandler, E: ToolExecutor>(
 
 pub fn load_view(ledger_path: &Path) -> Result<EngagementView> {
     let ledger = Ledger::open(ledger_path)?;
-    ledger.verify_chain().context("ledger integrity check failed")?;
+    ledger
+        .verify_chain()
+        .context("ledger integrity check failed")?;
     Ok(redagent_core::projections::project(&ledger.events()?))
 }
 

@@ -8,7 +8,11 @@ use redagent_app::{
 use redagent_core::Ledger;
 
 #[derive(Debug, Parser)]
-#[command(name = "redagent", version, about = "Autonomous offensive-security agent")]
+#[command(
+    name = "redagent",
+    version,
+    about = "Autonomous offensive-security agent"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -57,11 +61,7 @@ enum Command {
     },
 }
 
-fn resolve_llm_config(
-    base_url: &str,
-    model: &str,
-    key_env: &str,
-) -> Result<LlmConfig> {
+fn resolve_llm_config(base_url: &str, model: &str, key_env: &str) -> Result<LlmConfig> {
     let api_key = match std::env::var(key_env) {
         Ok(key) if !key.trim().is_empty() => key,
         _ if key_env == "REDAGENT_LLM_API_KEY" => match std::env::var("ICA_API_KEY") {

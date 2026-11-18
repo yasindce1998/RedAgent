@@ -903,6 +903,8 @@ name = "redagent-agent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "redagent-llm",
+ "serde",
  "serde_json",
 ]
 
@@ -914,6 +916,7 @@ dependencies = [
  "redagent-agent",
  "redagent-core",
  "redagent-guard",
+ "redagent-llm",
  "redagent-mcp",
  "serde_json",
  "tempfile",

@@ -52,7 +52,9 @@ impl Planner for DeterministicPlanner {
             return Err(anyhow!("goal must not be empty"));
         }
         if !available_tools.iter().any(|tool| tool.name == HEALTH_TOOL) {
-            return Err(anyhow!("{HEALTH_TOOL} is not available on this RedHands server"));
+            return Err(anyhow!(
+                "{HEALTH_TOOL} is not available on this RedHands server"
+            ));
         }
         Ok(vec![Intent {
             id: "intent-1".to_string(),
@@ -153,7 +155,12 @@ impl<C: JsonCompleter> LlmPlanner<C> {
             let arguments = match intent.arguments {
                 Value::Null => serde_json::json!({}),
                 Value::Object(map) => Value::Object(map),
-                _ => return Err(anyhow!("intent {} arguments must be a JSON object", index + 1)),
+                _ => {
+                    return Err(anyhow!(
+                        "intent {} arguments must be a JSON object",
+                        index + 1
+                    ))
+                }
             };
             intents.push(Intent {
                 id: format!("intent-{}", index + 1),
@@ -187,21 +194,23 @@ impl<C: JsonCompleter> Planner for LlmPlanner<C> {
             "Authorized engagement goal: {goal}\n\nRedHands tool catalog:\n{catalog}\n\nReturn the JSON plan now."
         );
 
-        match self.completer.complete_json(&self.system_prompt(None), &user) {
+        match self
+            .completer
+            .complete_json(&self.system_prompt(None), &user)
+        {
             Ok(text) => match self.parse_and_validate(&text, available_tools) {
-                Ok(intents) => return Ok(intents),
+                Ok(intents) => Ok(intents),
                 Err(error) => {
                     let retry_error = error.to_string();
                     let retry = self
                         .completer
                         .complete_json(&self.system_prompt(Some(&retry_error)), &user)
                         .context("LLM retry failed")?;
-                    return self
-                        .parse_and_validate(&retry, available_tools)
-                        .context("LLM plan invalid after one retry");
+                    self.parse_and_validate(&retry, available_tools)
+                        .context("LLM plan invalid after one retry")
                 }
             },
-            Err(error) => return Err(error).context("LLM planning request failed"),
+            Err(error) => Err(error).context("LLM planning request failed"),
         }
     }
 }
