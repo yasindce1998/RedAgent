@@ -1,0 +1,17 @@
+[package]
+name = "redagent-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true
+redagent-core = { path = "../core" }
+redagent-agent = { path = "../agent" }
+redagent-guard = { path = "../guard" }
+redagent-mcp = { path = "../mcp" }
+
+[dev-dependencies]
+tempfile.workspace = true
