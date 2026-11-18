@@ -1,19 +1,26 @@
-# RedAgent v0.1.0
+# RedAgent v0.2.0
 
-First release — the Phase 0 foundation: a typed agent loop over RedHands MCP.
+Phase 1 and Phase 2 — an autonomous agent loop with a native control room.
 
-- **Hash-chained SQLite event ledger** with integrity verification and derived projections (findings, intents, audit)
-- **Minimal dual-era MCP stdio client** (`initialize`, `tools/list`, `tools/call`) verified against the real RedHands v0.6.3 binary
-- **Deterministic Phase 0 planner** behind a `Planner` trait — an LLM planner drops in later without changing the engine
-- **Guard** with tool allowlist and hard call budget
-- **CLI**: `redagent run / report / verify`, producing Markdown engagement reports
-- **CI**: format, clippy, tests and release builds on Linux/macOS/Windows, plus a live-e2e job against a checksum-pinned RedHands v0.6.3
+## Autonomous loop (Phase 1)
 
-Contract version: **RedHands v0.6.3**. Only authorized engagements. MIT licensed.
+- **LLM planner** — schema-validated JSON intents checked against the live RedHands `tools/list` catalog; hallucinated tools never execute; one retry on malformed plans
+- **Approval elicitation** — RedHands' inline `input_required` results replayed with `inputResponses`; default deny, explicit `--auto-approve` for labs, every decision recorded
+- **Verifier** — results checked before findings are recorded; verification links appear in reports
+- **Budgets** — tool-call and intent caps enforced in code with ledger events
+
+## Control room (Phase 2)
+
+- **Axum REST/SSE API** — engagement list/detail/events/report, live `event: snapshot` stream, run endpoint, and an in-flight approval queue with `GET /api/approvals` / `POST /api/approvals/{id}`
+- **Dioxus 0.7 native desktop UI** — engagement list, status cards, findings/verification tables, approval queue, tool evidence, run form and polling; no webview, no Node
+- **`redagent serve`** — starts the API with configurable bind address, ledger dir, RedHands binary and approval timeout
+- **Serializable projections** — one typed contract shared by engine, API and UI
+
+Contract version: **RedHands v0.6.3**. MIT licensed. Authorized engagements only.
 
 Verify a download:
 
 ```sh
 sha256sum -c SHA256SUMS
-./redagent_0.1.0/redagent --version   # redagent 0.1.0
+./redagent_0.2.0/redagent --version   # redagent 0.2.0
 ```
