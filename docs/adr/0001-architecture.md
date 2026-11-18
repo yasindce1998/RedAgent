@@ -60,5 +60,17 @@ guard allowlist/budget, CLI (`run` / `report` / `verify`) and CI.
   without changing the engine.
 - Budgets are enforced in the guard before each call and recorded as events.
 
-Dioxus UI, evidence blobs, retest loops and enterprise features remain later
-phases.
+## Phase 2 decisions
+
+- **Axum control API** exposes the ledger as REST plus an SSE projection stream.
+  It never mutates ledger history; run requests append new events through the
+  same engine. In-flight approvals are routed through a channel-backed handler
+  and a `POST /api/approvals/{id}` endpoint — the operator decision is recorded
+  in the ledger, so remote approval has the same audit semantics as local.
+- **Dioxus native UI** (0.7 native renderer, no webview and no Node) renders
+  projections and posts commands over the API. It holds no business logic: all
+  decisions remain in `redagent-app`.
+- The UI ships as a separate binary (`redagent-ui`); the CLI gains `serve` to
+  start the API. One Rust workspace, no frontend toolchain.
+
+Evidence blobs, retest loops and enterprise features remain later phases.

@@ -28,9 +28,10 @@ RedHands exposes capabilities. RedAgent decides **what to try next**, remembers 
 | 🔗 **MCP-native execution** | Every action is a structured `tools/call` to RedHands — the same argv validation, approval policy and engagement scope operators already trust. |
 | 🧾 **Receipts by default** | An append-only, hash-chained ledger records each intent, guard decision, tool result and finding. Reports are projections — audit is not an afterthought. |
 | 🛡️ **Guardrails in code** | Allowlists and hard budgets are enforced before a call leaves the process, not hoped for in a prompt. |
-| ⚡ **Two planes, one binary** | Go stays where it shines (the tool plane); Rust owns the control plane and, from Phase 2, the Dioxus UI. One protocol between them: MCP. |
+| 🖥️ **Native control room** | A Dioxus desktop UI and an Axum REST/SSE API stream live projections and route approval prompts to the operator — no web frontend, no database server. |
+| ⚡ **Two planes, one protocol** | Go stays where it shines (the tool plane); Rust owns the control plane and the native UI. One protocol between them: MCP. |
 
-> **Status:** Phase 1 shipped. An LLM planner emits validated typed intents from the live RedHands tool catalog; a verifier checks each result; gated tools progress through approval elicitation. Everything is recorded in the ledger. The deterministic planner remains available for offline runs.
+> **Status:** Phase 2 shipped. Alongside the Phase 1 autonomous loop, RedAgent now has a native Dioxus desktop UI and an Axum REST/SSE control API for live engagement monitoring and operator approvals.
 
 ## How it works
 
@@ -77,6 +78,31 @@ Gated RedHands tools return an inline `input_required` result. By default RedAge
 
 The engine spawns RedHands over stdio with a minimal toolset and redirects every state directory next to the ledger — your working directory stays clean, and the resulting `.db` is a portable, verifiable engagement record.
 
+### Control room (Phase 2)
+
+```sh
+# Terminal 1: REST/SSE control API
+./target/release/redagent serve --redhands /path/to/redhands \
+  --ledger-dir ./engagements --bind 127.0.0.1:8787
+
+# Terminal 2: native Dioxus desktop UI
+cargo run --release -p redagent-ui
+```
+
+The UI lists engagements, streams live ledger projections over SSE (with polling fallback), shows findings and verifications, and lets an operator approve or deny gated tools in flight. The server also exposes plain HTTP endpoints for SOAR/scripting:
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/health` | liveness |
+| `GET /api/engagements` | engagement ids |
+| `GET /api/engagements/{id}` | projection JSON |
+| `GET /api/engagements/{id}/events` | raw ledger events |
+| `GET /api/engagements/{id}/report` | Markdown report |
+| `GET /api/engagements/{id}/stream` | SSE projection stream |
+| `GET /api/approvals` | pending approvals |
+| `POST /api/approvals/{id}` | approve / deny |
+| `POST /api/engagements` | launch an engagement |
+
 ## Built different
 
 - **No copied code, no license contamination.** Every line is original — RedAgent is clean-room, MIT, and yours.
@@ -96,7 +122,9 @@ See [ADR 0001](docs/adr/0001-architecture.md) for the full decision record.
 | `redagent-agent` | `Planner` trait, deterministic + LLM planners |
 | `redagent-guard` | Tool allowlist and call budget |
 | `redagent-app` | Engine: approval elicitation, verifier, single wiring point |
-| `redagent-cli` | `run` / `report` / `verify` |
+| `redagent-api` | Axum REST + SSE control API, in-flight approval queue |
+| `redagent-ui` | Native Dioxus desktop control room |
+| `redagent-cli` | `run` / `report` / `verify` / `serve` |
 
 CI runs format, clippy, tests and release builds on Linux, macOS and Windows, plus a **live-e2e job** that downloads RedHands v0.6.3 with its published SHA-256 and drives the complete loop against the real Go server.
 
@@ -106,7 +134,7 @@ CI runs format, clippy, tests and release builds on Linux, macOS and Windows, pl
 |---|---|---|
 | 0 | Ledger, typed intent, MCP loop, guard, CLI, CI | ✅ shipped |
 | 1 | LLM planner, verifier, approval elicitation, budgets | ✅ shipped |
-| 2 | Dioxus desktop UI + Axum REST/SSE projections | planned |
+| 2 | Dioxus desktop UI + Axum REST/SSE projections | ✅ shipped |
 | 3 | Evidence blobs, retest loop, exports, Dioxus WASM web console | planned |
 | 4 | RBAC/KMS, OTel, WASM plugins (only if measured) | planned |
 
