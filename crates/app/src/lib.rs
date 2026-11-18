@@ -12,8 +12,6 @@ use redagent_mcp::{StdioMcpClient, ToolCallResult};
 use serde_json::Value;
 
 pub const DEFAULT_REDHANDS_VERSION: &str = "v0.6.3";
-pub const DEFAULT_LLM_BASE_URL: &str = "https://api.servicesessentials.ibm.com/v1";
-pub const DEFAULT_LLM_MODEL: &str = "ibm/granite-4-h-small";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlannerMode {

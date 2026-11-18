@@ -105,7 +105,7 @@
   <!-- footer pills -->
   <g font-family="Inter, Segoe UI, sans-serif" font-size="12.5">
     <rect x="50" y="506" width="238" height="32" rx="16" fill="#161e30" stroke="#2b3855"/>
-    <text x="169" y="527" fill="#c4cee2" text-anchor="middle">Model-agnostic · IBM ICA ready</text>
+    <text x="169" y="527" fill="#c4cee2" text-anchor="middle">Model-agnostic · OpenAI-compatible</text>
     <rect x="304" y="506" width="204" height="32" rx="16" fill="#161e30" stroke="#2b3855"/>
     <text x="406" y="527" fill="#c4cee2" text-anchor="middle">No shell escape hatch</text>
     <rect x="524" y="506" width="238" height="32" rx="16" fill="#161e30" stroke="#2b3855"/>
