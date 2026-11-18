@@ -147,7 +147,7 @@ pub(crate) struct ApiApprovalHandler {
 }
 
 impl ApprovalHandler for ApiApprovalHandler {
-    fn decide(&self, tool: &str, message: &str) -> anyhow::Result<(bool, String)> {
+    fn decide(&self, intent_id: &str, tool: &str, message: &str) -> anyhow::Result<(bool, String)> {
         if self.auto_approve {
             return Ok((true, "auto-approve".to_string()));
         }
@@ -155,10 +155,7 @@ impl ApprovalHandler for ApiApprovalHandler {
         let request_id = self.state.next_request_id();
         let approval = PendingApproval {
             request_id: request_id.clone(),
-            // The ApprovalHandler trait only exposes (tool, message), so the
-            // engine's internal intent id is not observable here. Surface a
-            // stable, non-empty identifier derived from the request id.
-            intent_id: request_id.clone(),
+            intent_id: intent_id.to_string(),
             tool: tool.to_string(),
             message: message.to_string(),
         };
@@ -590,7 +587,7 @@ mod tests {
 
         let worker = std::thread::spawn(move || {
             let decision = handler
-                .decide("redhands_scan", "approve this call?")
+                .decide("intent-7", "redhands_scan", "approve this call?")
                 .unwrap();
             tx.send(decision).unwrap();
         });
@@ -647,7 +644,9 @@ mod tests {
         };
         let (tx, rx) = mpsc::channel();
         let worker = std::thread::spawn(move || {
-            let decision = handler.decide("redhands_exec", "dangerous call").unwrap();
+            let decision = handler
+                .decide("intent-9", "redhands_exec", "dangerous call")
+                .unwrap();
             tx.send(decision).unwrap();
         });
 

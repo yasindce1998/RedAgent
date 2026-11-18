@@ -1027,8 +1027,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "redagent-api",
  "redagent-app",
  "redagent-core",
+ "tokio",
 ]
 
 [[package]]

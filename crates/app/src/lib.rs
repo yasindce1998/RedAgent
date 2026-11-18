@@ -138,13 +138,13 @@ impl ToolExecutor for McpExecutor {
 
 /// Who answers an approval prompt. Default is deny — fail closed.
 pub trait ApprovalHandler {
-    fn decide(&self, tool: &str, message: &str) -> Result<(bool, String)>;
+    fn decide(&self, intent_id: &str, tool: &str, message: &str) -> Result<(bool, String)>;
 }
 
 pub struct DenyAll;
 
 impl ApprovalHandler for DenyAll {
-    fn decide(&self, _tool: &str, _message: &str) -> Result<(bool, String)> {
+    fn decide(&self, _intent_id: &str, _tool: &str, _message: &str) -> Result<(bool, String)> {
         Ok((false, "operator (default deny)".to_string()))
     }
 }
@@ -152,7 +152,7 @@ impl ApprovalHandler for DenyAll {
 pub struct ApproveAll;
 
 impl ApprovalHandler for ApproveAll {
-    fn decide(&self, _tool: &str, _message: &str) -> Result<(bool, String)> {
+    fn decide(&self, _intent_id: &str, _tool: &str, _message: &str) -> Result<(bool, String)> {
         Ok((true, "auto-approve".to_string()))
     }
 }
@@ -331,7 +331,7 @@ fn execute<V: Verifier, A: ApprovalHandler + ?Sized, E: ToolExecutor>(
                 tool: intent.tool.clone(),
                 request_id,
             })?;
-            let (approved, decided_by) = approvals.decide(&intent.tool, &message)?;
+            let (approved, decided_by) = approvals.decide(&intent.id, &intent.tool, &message)?;
             ledger.append(&EventBody::ApprovalDecisionRecorded {
                 intent_id: intent.id.clone(),
                 approved,
