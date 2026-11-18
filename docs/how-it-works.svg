@@ -1,0 +1,116 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 560" width="1200" height="560" role="img" aria-label="RedAgent how it works diagram">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0e1424"/>
+      <stop offset="1" stop-color="#070a12"/>
+    </linearGradient>
+    <linearGradient id="card" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1a2236"/>
+      <stop offset="1" stop-color="#101728"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ff5b6c"/>
+      <stop offset="1" stop-color="#c4112c"/>
+    </linearGradient>
+    <radialGradient id="halo" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#ff2d45" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#ff2d45" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0V40" fill="none" stroke="#ffffff" stroke-opacity="0.035" stroke-width="1"/>
+    </pattern>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="10" stdDeviation="14" flood-color="#000" flood-opacity="0.45"/>
+    </filter>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="6"/>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#ff5b6c"/>
+    </marker>
+    <marker id="arrow-dim" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#ff8b96"/>
+    </marker>
+  </defs>
+
+  <!-- backdrop -->
+  <rect width="1200" height="560" rx="28" fill="url(#bg)"/>
+  <rect width="1200" height="560" rx="28" fill="url(#grid)"/>
+  <ellipse cx="600" cy="250" rx="520" ry="220" fill="url(#halo)" filter="url(#glow)" opacity="0.55"/>
+
+  <!-- header -->
+  <text x="60" y="62" fill="#ff6a78" font-family="Inter, Segoe UI, sans-serif" font-size="15" font-weight="700" letter-spacing="3">REDAGENT</text>
+  <text x="60" y="92" fill="#e8edf7" font-family="Inter, Segoe UI, sans-serif" font-size="26" font-weight="600">The autonomous loop</text>
+  <text x="1135" y="62" fill="#7c89a3" font-family="Inter, Segoe UI, sans-serif" font-size="13" text-anchor="end" letter-spacing="1">GOAL → EVIDENCE</text>
+
+  <!-- cards -->
+  <g font-family="Inter, Segoe UI, sans-serif" filter="url(#shadow)">
+    <!-- A: goal -->
+    <g>
+      <rect x="50" y="170" width="180" height="130" rx="18" fill="url(#card)" stroke="url(#accent)" stroke-width="2.5"/>
+      <circle cx="76" cy="198" r="13" fill="url(#accent)"/>
+      <text x="76" y="203" fill="#fff" font-size="12" font-weight="700" text-anchor="middle">1</text>
+      <text x="140" y="240" fill="#ffffff" font-size="19" font-weight="700" text-anchor="middle">GOAL</text>
+      <text x="140" y="268" fill="#a9b6cf" font-size="12" text-anchor="middle">objective, not steps</text>
+    </g>
+    <!-- B: planner -->
+    <g>
+      <rect x="260" y="170" width="180" height="130" rx="18" fill="url(#card)" stroke="url(#accent)" stroke-width="2.5"/>
+      <circle cx="286" cy="198" r="13" fill="url(#accent)"/>
+      <text x="286" y="203" fill="#fff" font-size="12" font-weight="700" text-anchor="middle">2</text>
+      <text x="350" y="240" fill="#ffffff" font-size="19" font-weight="700" text-anchor="middle">PLANNER</text>
+      <text x="350" y="268" fill="#a9b6cf" font-size="12" text-anchor="middle">typed intent</text>
+    </g>
+    <!-- C: guard -->
+    <g>
+      <rect x="470" y="170" width="180" height="130" rx="18" fill="url(#card)" stroke="url(#accent)" stroke-width="2.5"/>
+      <circle cx="496" cy="198" r="13" fill="url(#accent)"/>
+      <text x="496" y="203" fill="#fff" font-size="12" font-weight="700" text-anchor="middle">3</text>
+      <text x="560" y="240" fill="#ffffff" font-size="19" font-weight="700" text-anchor="middle">GUARD</text>
+      <text x="560" y="268" fill="#a9b6cf" font-size="12" text-anchor="middle">allowlist · budget</text>
+    </g>
+    <!-- D: RedHands -->
+    <g>
+      <rect x="680" y="170" width="180" height="130" rx="18" fill="url(#card)" stroke="url(#accent)" stroke-width="2.5"/>
+      <circle cx="706" cy="198" r="13" fill="url(#accent)"/>
+      <text x="706" y="203" fill="#fff" font-size="12" font-weight="700" text-anchor="middle">4</text>
+      <text x="770" y="240" fill="#ffffff" font-size="19" font-weight="700" text-anchor="middle">REDHANDS</text>
+      <text x="770" y="268" fill="#a9b6cf" font-size="12" text-anchor="middle">MCP · stdio / HTTP</text>
+    </g>
+    <!-- E: ledger -->
+    <g>
+      <rect x="890" y="170" width="180" height="130" rx="18" fill="url(#card)" stroke="url(#accent)" stroke-width="2.5"/>
+      <circle cx="916" cy="198" r="13" fill="url(#accent)"/>
+      <text x="916" y="203" fill="#fff" font-size="12" font-weight="700" text-anchor="middle">5</text>
+      <text x="980" y="240" fill="#ffffff" font-size="19" font-weight="700" text-anchor="middle">LEDGER</text>
+      <text x="980" y="268" fill="#a9b6cf" font-size="12" text-anchor="middle">hash-chained events</text>
+    </g>
+  </g>
+
+  <!-- forward arrows -->
+  <g stroke="#ff5b6c" stroke-width="3" fill="none" marker-end="url(#arrow)">
+    <path d="M232 235 H256"/>
+    <path d="M442 235 H466"/>
+    <path d="M652 235 H676"/>
+    <path d="M862 235 H886"/>
+  </g>
+
+  <!-- feedback loop -->
+  <path d="M980 302 V430 Q980 452 958 452 H372 Q350 452 350 430 V306"
+        fill="none" stroke="#ff8b96" stroke-width="2.5" stroke-dasharray="8 7"
+        opacity="0.85" marker-end="url(#arrow-dim)"/>
+  <rect x="548" y="438" width="236" height="28" rx="14" fill="#0e1424"/>
+  <text x="666" y="457" fill="#ff9aa4" font-family="Inter, Segoe UI, sans-serif" font-size="12.5" font-weight="600" text-anchor="middle" letter-spacing="0.4">observations feed the next plan</text>
+
+  <!-- footer pills -->
+  <g font-family="Inter, Segoe UI, sans-serif" font-size="12.5">
+    <rect x="50" y="506" width="238" height="32" rx="16" fill="#161e30" stroke="#2b3855"/>
+    <text x="169" y="527" fill="#c4cee2" text-anchor="middle">Model-agnostic · IBM ICA ready</text>
+    <rect x="304" y="506" width="204" height="32" rx="16" fill="#161e30" stroke="#2b3855"/>
+    <text x="406" y="527" fill="#c4cee2" text-anchor="middle">No shell escape hatch</text>
+    <rect x="524" y="506" width="238" height="32" rx="16" fill="#161e30" stroke="#2b3855"/>
+    <text x="643" y="527" fill="#c4cee2" text-anchor="middle">Replayable · verifiable ledger</text>
+    <rect x="778" y="506" width="292" height="32" rx="16" fill="#161e30" stroke="#2b3855"/>
+    <text x="924" y="527" fill="#c4cee2" text-anchor="middle">Dioxus UI arrives in Phase 2</text>
+  </g>
+</svg>

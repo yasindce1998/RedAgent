@@ -34,21 +34,7 @@ RedHands exposes capabilities. RedAgent decides **what to try next**, remembers 
 
 ## How it works
 
-```
-        goal
-          │
-          ▼
-   ┌─────────────┐     ┌──────────┐     ┌──────────────────┐
-   │ planner     │────▶│ guard    │────▶│ RedHands via MCP │
-   │ typed intent│     │ allowlist│     │ stdio or HTTP    │
-   └─────────────┘     │ budget   │     └────────┬─────────┘
-                       └──────────┘              │ tool result
-          ▲                                     ▼
-          │            ┌───────────────────────────────┐
-          └────────────│  hash-chained event ledger    │
-             re-plan   │  → findings → Markdown report │
-                       └───────────────────────────────┘
-```
+![RedAgent autonomous loop: goal → planner → guard → RedHands via MCP → hash-chained ledger, with observations feeding back into planning](docs/how-it-works.svg)
 
 ## Quick start
 
@@ -69,7 +55,7 @@ The engine spawns RedHands over stdio with a minimal toolset and redirects every
 
 ## Built different
 
-- **No copied code, no license contamination.** ARTEX was studied as a reference, not forked. RedAgent is clean-room, MIT, and yours.
+- **No copied code, no license contamination.** Every line is original — RedAgent is clean-room, MIT, and yours.
 - **No FFI, no sidecar services, no database server.** Two processes, one protocol, one Cargo.lock.
 - **No hidden state.** Graphs, coverage and findings are projections of immutable events — replay, verify and export them at any time.
 - **Operator-first safety.** Approved-tool gating lives in RedHands; RedAgent never gains a path around it. Authorized engagements only.
