@@ -9,10 +9,10 @@ policies, engagement scope, audit log, targetdb, campaign engine. MCP exposes
 capabilities but provides no autonomy — no planner, no cross-step memory, no
 coverage tracking, no adaptive re-planning.
 
-ARTEX was evaluated as a reference architecture for the agent layer. Its
-planner/worker loop, dual graphs and evidence model are useful patterns, but
-its implementation is fragmented (20+ subsystems, Go + Next.js + Postgres),
-and it is AGPL-3.0. No ARTEX code is used or copied.
+Existing autonomous-pentest designs were reviewed for patterns such as
+planner/worker loops, dual graphs, evidence binding and approval gates. Their
+implementations were judged too fragmented and heavyweight for this project.
+All RedAgent code is original; no external implementation was copied.
 
 ## Decision
 

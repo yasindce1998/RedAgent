@@ -54,9 +54,9 @@ cargo build --release
 ### LLM planner
 
 ```sh
-export REDAGENT_LLM_API_KEY="..."            # IBM ICA key (ICA_API_KEY also accepted)
-export REDAGENT_LLM_BASE_URL="https://api.servicesessentials.ibm.com/v1"
-export REDAGENT_LLM_MODEL="ibm/granite-4-h-small"
+export REDAGENT_LLM_API_KEY="..."
+export REDAGENT_LLM_BASE_URL="https://your-openai-compatible-endpoint/v1"
+export REDAGENT_LLM_MODEL="your-model"
 
 ./target/release/redagent run "enumerate the lab and report exposure" \
   --llm --redhands /path/to/redhands --ledger llm-run.db
@@ -92,7 +92,7 @@ See [ADR 0001](docs/adr/0001-architecture.md) for the full decision record.
 |---|---|
 | `redagent-core` | Event ledger, hash chain, projections, report rendering |
 | `redagent-mcp` | Minimal dual-era MCP stdio client + test server |
-| `redagent-llm` | OpenAI-compatible JSON chat client (IBM ICA ready) |
+| `redagent-llm` | OpenAI-compatible JSON chat client |
 | `redagent-agent` | `Planner` trait, deterministic + LLM planners |
 | `redagent-guard` | Tool allowlist and call budget |
 | `redagent-app` | Engine: approval elicitation, verifier, single wiring point |

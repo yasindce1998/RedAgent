@@ -2,9 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
-use redagent_app::{
-    report_markdown, run, Config, LlmConfig, DEFAULT_LLM_BASE_URL, DEFAULT_LLM_MODEL,
-};
+use redagent_app::{report_markdown, run, Config, LlmConfig};
 use redagent_core::Ledger;
 
 #[derive(Debug, Parser)]
@@ -32,12 +30,12 @@ enum Command {
         /// Use the LLM planner instead of the deterministic Phase 0 planner.
         #[arg(long)]
         llm: bool,
-        /// OpenAI-compatible chat endpoint (env: REDAGENT_LLM_BASE_URL).
-        #[arg(long, default_value = DEFAULT_LLM_BASE_URL)]
-        llm_base_url: String,
-        /// Model name (env: REDAGENT_LLM_MODEL).
-        #[arg(long, default_value = DEFAULT_LLM_MODEL)]
-        llm_model: String,
+        /// OpenAI-compatible chat endpoint (or env: REDAGENT_LLM_BASE_URL).
+        #[arg(long)]
+        llm_base_url: Option<String>,
+        /// Model name (or env: REDAGENT_LLM_MODEL).
+        #[arg(long)]
+        llm_model: Option<String>,
         /// Environment variable holding the LLM API key.
         #[arg(long, default_value = "REDAGENT_LLM_API_KEY")]
         llm_api_key_env: String,
@@ -61,29 +59,29 @@ enum Command {
     },
 }
 
-fn resolve_llm_config(base_url: &str, model: &str, key_env: &str) -> Result<LlmConfig> {
+fn resolve_llm_config(
+    base_url: Option<String>,
+    model: Option<String>,
+    key_env: &str,
+) -> Result<LlmConfig> {
     let api_key = match std::env::var(key_env) {
         Ok(key) if !key.trim().is_empty() => key,
-        _ if key_env == "REDAGENT_LLM_API_KEY" => match std::env::var("ICA_API_KEY") {
-            Ok(key) if !key.trim().is_empty() => key,
-            _ => bail!(
-                "no LLM API key: set REDAGENT_LLM_API_KEY (or ICA_API_KEY), or pass --llm-api-key-env"
-            ),
-        },
         _ => bail!("no LLM API key in environment variable {key_env}"),
     };
+    let base_url = base_url
+        .or_else(|| std::env::var("REDAGENT_LLM_BASE_URL").ok())
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!("set REDAGENT_LLM_BASE_URL or pass --llm-base-url for --llm")
+        })?;
+    let model = model
+        .or_else(|| std::env::var("REDAGENT_LLM_MODEL").ok())
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("set REDAGENT_LLM_MODEL or pass --llm-model for --llm"))?;
     Ok(LlmConfig {
-        base_url: if key_env == "REDAGENT_LLM_API_KEY" {
-            std::env::var("REDAGENT_LLM_BASE_URL").unwrap_or_else(|_| base_url.to_string())
-        } else {
-            base_url.to_string()
-        },
+        base_url,
         api_key,
-        model: if key_env == "REDAGENT_LLM_API_KEY" {
-            std::env::var("REDAGENT_LLM_MODEL").unwrap_or_else(|_| model.to_string())
-        } else {
-            model.to_string()
-        },
+        model,
     })
 }
 
@@ -106,8 +104,8 @@ fn main() -> Result<()> {
                 .with_limits(max_tool_calls, max_intents);
             if llm {
                 config = config.with_llm(resolve_llm_config(
-                    &llm_base_url,
-                    &llm_model,
+                    llm_base_url,
+                    llm_model,
                     &llm_api_key_env,
                 )?);
             }

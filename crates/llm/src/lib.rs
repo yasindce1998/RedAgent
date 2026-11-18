@@ -1,5 +1,5 @@
-//! Minimal synchronous client for OpenAI-compatible chat endpoints (including
-//! the IBM ICA gateway). Only JSON mode is implemented: [`LlmClient::complete_json`]
+//! Minimal synchronous client for OpenAI-compatible chat endpoints. Only JSON
+//! mode is implemented: [`LlmClient::complete_json`]
 //! asks the model for a `json_object` response and returns the raw content
 //! string, which [`extract_json_object`] can turn into a [`serde_json::Value`].
 
