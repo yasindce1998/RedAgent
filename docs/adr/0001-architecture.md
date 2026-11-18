@@ -44,6 +44,21 @@ client). Adding a third process or language requires a measured bottleneck.
 ## Scope of Phase 0
 
 Event ledger, deterministic single-intent planner, minimal MCP stdio client,
-guard allowlist/budget, CLI (`run` / `report` / `verify`) and CI. The LLM
-planner, Dioxus UI, approval elicitation, evidence blobs and enterprise
-features come in later phases.
+guard allowlist/budget, CLI (`run` / `report` / `verify`) and CI.
+
+## Phase 1 decisions
+
+- **LLM planner** implements the same `Planner` trait. It receives the live
+  `tools/list` catalog, emits JSON-only intents, validates every tool name and
+  argument object, and retries once on malformed output. A hallucinated tool
+  never reaches RedHands.
+- **Approvals fail closed.** Gated tools return RedHands' inline
+  `input_required` result; the default handler denies. `--auto-approve` is an
+  explicit, loudly warned lab-only option and is recorded in the ledger.
+- **Verifier** is a trait; Phase 1 uses a heuristic implementation so results
+  are checked before findings are recorded. An LLM verifier can replace it
+  without changing the engine.
+- Budgets are enforced in the guard before each call and recorded as events.
+
+Dioxus UI, evidence blobs, retest loops and enterprise features remain later
+phases.

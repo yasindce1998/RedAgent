@@ -11,6 +11,7 @@ serde_json.workspace = true
 redagent-core = { path = "../core" }
 redagent-agent = { path = "../agent" }
 redagent-guard = { path = "../guard" }
+redagent-llm = { path = "../llm" }
 redagent-mcp = { path = "../mcp" }
 
 [dev-dependencies]

@@ -30,7 +30,7 @@ RedHands exposes capabilities. RedAgent decides **what to try next**, remembers 
 | 🛡️ **Guardrails in code** | Allowlists and hard budgets are enforced before a call leaves the process, not hoped for in a prompt. |
 | ⚡ **Two planes, one binary** | Go stays where it shines (the tool plane); Rust owns the control plane and, from Phase 2, the Dioxus UI. One protocol between them: MCP. |
 
-> **Status:** Phase 0 foundation is shipped and tested end to end. The planner is deterministic today; a schema-validated LLM planner plugs into the same trait in Phase 1.
+> **Status:** Phase 1 shipped. An LLM planner emits validated typed intents from the live RedHands tool catalog; a verifier checks each result; gated tools progress through approval elicitation. Everything is recorded in the ledger. The deterministic planner remains available for offline runs.
 
 ## How it works
 
@@ -51,6 +51,30 @@ cargo build --release
 ./target/release/redagent verify  --ledger engagement.db   # check the hash chain
 ```
 
+### LLM planner
+
+```sh
+export REDAGENT_LLM_API_KEY="..."            # IBM ICA key (ICA_API_KEY also accepted)
+export REDAGENT_LLM_BASE_URL="https://api.servicesessentials.ibm.com/v1"
+export REDAGENT_LLM_MODEL="ibm/granite-4-h-small"
+
+./target/release/redagent run "enumerate the lab and report exposure" \
+  --llm --redhands /path/to/redhands --ledger llm-run.db
+```
+
+The planner receives the real `tools/list` catalog, returns JSON-only intents, and every tool name and argument object is validated before execution — a hallucinated tool never reaches RedHands. Malformed plans get exactly one retry, then abort into the ledger.
+
+### Approvals
+
+Gated RedHands tools return an inline `input_required` result. By default RedAgent **denies** — nothing proceeds without an operator. For an isolated lab you can opt in explicitly:
+
+```sh
+./target/release/redagent run "..." --llm --auto-approve \
+  --redhands /path/to/redhands --ledger lab.db
+```
+
+`--auto-approve` prints a loud warning and records `decided_by: auto-approve` in the ledger for every approval. Approval grants last exactly one tool call, matching RedHands' contract.
+
 The engine spawns RedHands over stdio with a minimal toolset and redirects every state directory next to the ledger — your working directory stays clean, and the resulting `.db` is a portable, verifiable engagement record.
 
 ## Built different
@@ -68,9 +92,10 @@ See [ADR 0001](docs/adr/0001-architecture.md) for the full decision record.
 |---|---|
 | `redagent-core` | Event ledger, hash chain, projections, report rendering |
 | `redagent-mcp` | Minimal dual-era MCP stdio client + test server |
-| `redagent-agent` | `Planner` trait and the Phase 0 deterministic planner |
+| `redagent-llm` | OpenAI-compatible JSON chat client (IBM ICA ready) |
+| `redagent-agent` | `Planner` trait, deterministic + LLM planners |
 | `redagent-guard` | Tool allowlist and call budget |
-| `redagent-app` | The single wiring point |
+| `redagent-app` | Engine: approval elicitation, verifier, single wiring point |
 | `redagent-cli` | `run` / `report` / `verify` |
 
 CI runs format, clippy, tests and release builds on Linux, macOS and Windows, plus a **live-e2e job** that downloads RedHands v0.6.3 with its published SHA-256 and drives the complete loop against the real Go server.
@@ -80,7 +105,7 @@ CI runs format, clippy, tests and release builds on Linux, macOS and Windows, pl
 | Phase | Deliverable | Status |
 |---|---|---|
 | 0 | Ledger, typed intent, MCP loop, guard, CLI, CI | ✅ shipped |
-| 1 | LLM planner, worker/verifier, approval elicitation, budgets | next |
+| 1 | LLM planner, verifier, approval elicitation, budgets | ✅ shipped |
 | 2 | Dioxus desktop UI + Axum REST/SSE projections | planned |
 | 3 | Evidence blobs, retest loop, exports, Dioxus WASM web console | planned |
 | 4 | RBAC/KMS, OTel, WASM plugins (only if measured) | planned |
