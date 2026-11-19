@@ -1,16 +1,15 @@
-//! RedAgent native control UI.
+//! RedAgent control UI, shared between the native desktop and WASM web shells.
 //!
-//! A small Dioxus desktop client for the Phase 2 HTTP API. The UI is a thin
-//! projection viewer: all state is fetched from the API and every mutation is
-//! an explicit POST. It holds no ledger of its own.
+//! The UI is a thin projection viewer: all state is fetched from the API and
+//! every mutation is an explicit POST. It holds no ledger of its own. The two
+//! thin binaries (`native` and `web`) only pick a renderer and launch [`app`].
 
 use dioxus::prelude::*;
 use redagent_core::EngagementView;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
 
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8787";
-const POLL_INTERVAL: Duration = Duration::from_millis(1500);
+const POLL_INTERVAL_MS: u64 = 1500;
 
 const ROOT_STYLE: &str = "background:#0b1020;color:#e8ecf5;font-family:system-ui,-apple-system,sans-serif;min-height:100vh;";
 const HEADER_STYLE: &str = "display:flex;align-items:center;gap:14px;padding:14px 22px;background:#0b1020;border-bottom:1px solid #26324c;";
@@ -28,11 +27,24 @@ const INPUT_STYLE: &str = "width:100%;box-sizing:border-box;background:#0f1628;c
 const MUTED_STYLE: &str = "color:#8b96ad;font-size:12px;margin:6px 0;";
 const PRIMARY_BUTTON_STYLE: &str = "background:#ff4d5e;color:#0b1020;border:none;border-radius:8px;padding:9px 14px;font-weight:700;cursor:pointer;";
 const DENY_BUTTON_STYLE: &str = "background:#232d44;color:#ff9aa6;border:1px solid #ff4d5e;border-radius:8px;padding:9px 14px;font-weight:700;cursor:pointer;";
+const LINK_STYLE: &str = "display:inline-block;background:#232d44;color:#8ad6ff;border:1px solid #3b4a6b;border-radius:8px;padding:8px 12px;font-size:13px;font-weight:700;text-decoration:none;";
 const ERROR_STYLE: &str = "background:#3a1220;color:#ffd7dc;border:1px solid #ff4d5e;border-radius:8px;padding:10px 16px;margin:12px 22px 0;";
 const TH_STYLE: &str = "text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:1px;color:#8b96ad;padding:6px 8px;border-bottom:1px solid #26324c;";
 const TD_STYLE: &str =
     "font-size:13px;padding:7px 8px;border-bottom:1px solid #202a42;vertical-align:top;";
 const PRE_STYLE: &str = "background:#0b1020;color:#d7e0f0;border:1px solid #202a42;border-radius:8px;padding:12px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:12px;margin:6px 0 0;";
+
+/// Platform-neutral async sleep used by the polling loop.
+#[cfg(not(target_arch = "wasm32"))]
+async fn sleep_ms(ms: u64) {
+    tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+}
+
+/// Browser timer used by the polling loop on WASM.
+#[cfg(target_arch = "wasm32")]
+async fn sleep_ms(ms: u64) {
+    gloo_timers::future::TimeoutFuture::new(ms as u32).await;
+}
 
 #[derive(Clone, Deserialize)]
 struct Health {
@@ -41,42 +53,39 @@ struct Health {
 }
 
 #[derive(Clone, Deserialize)]
-struct PendingApproval {
-    request_id: String,
-    intent_id: String,
-    tool: String,
-    message: String,
+pub struct PendingApproval {
+    pub request_id: String,
+    pub intent_id: String,
+    pub tool: String,
+    pub message: String,
 }
 
 /// Body of `POST /api/engagements`. The RedHands path is intentionally absent:
 /// the API resolves it from server-side configuration.
 #[derive(Clone, Serialize)]
-struct RunForm {
-    goal: String,
-    ledger: Option<()>,
-    llm: bool,
-    auto_approve: bool,
-    max_tool_calls: u32,
-    max_intents: u32,
+pub struct RunForm {
+    pub goal: String,
+    pub ledger: Option<()>,
+    pub llm: bool,
+    pub auto_approve: bool,
+    pub max_tool_calls: u32,
+    pub max_intents: u32,
 }
 
 /// All shared UI state, grouped so async handlers can be spawned cheaply.
 #[derive(Clone, Copy)]
-struct ApiState {
-    base_url: Signal<String>,
-    engagements: Signal<Vec<String>>,
-    selected: Signal<Option<String>>,
-    detail: Signal<Option<EngagementView>>,
-    approvals: Signal<Vec<PendingApproval>>,
-    error: Signal<Option<String>>,
-    connected: Signal<Option<String>>,
+pub struct ApiState {
+    pub base_url: Signal<String>,
+    pub engagements: Signal<Vec<String>>,
+    pub selected: Signal<Option<String>>,
+    pub detail: Signal<Option<EngagementView>>,
+    pub approvals: Signal<Vec<PendingApproval>>,
+    pub error: Signal<Option<String>>,
+    pub connected: Signal<Option<String>>,
 }
 
-fn main() {
-    dioxus::launch(app);
-}
-
-fn app() -> Element {
+/// Root component shared by the native and web shells.
+pub fn app() -> Element {
     let mut base_url = use_signal(|| DEFAULT_BASE_URL.to_string());
     let engagements = use_signal(Vec::<String>::new);
     let selected = use_signal(|| None::<String>);
@@ -103,7 +112,7 @@ fn app() -> Element {
     use_future(move || async move {
         loop {
             refresh_all(api).await;
-            tokio::time::sleep(POLL_INTERVAL).await;
+            sleep_ms(POLL_INTERVAL_MS).await;
         }
     });
 
@@ -155,7 +164,7 @@ fn app() -> Element {
     }
 }
 
-fn sidebar(
+pub fn sidebar(
     engagements: Signal<Vec<String>>,
     mut selected: Signal<Option<String>>,
     goal: Signal<String>,
@@ -202,7 +211,7 @@ fn sidebar(
     }
 }
 
-fn run_form(
+pub fn run_form(
     mut goal: Signal<String>,
     mut redhands_path: Signal<String>,
     mut llm: Signal<bool>,
@@ -268,7 +277,7 @@ fn run_form(
     }
 }
 
-fn engagement_detail(
+pub fn engagement_detail(
     detail: Signal<Option<EngagementView>>,
     approvals: Signal<Vec<PendingApproval>>,
     api: ApiState,
@@ -294,6 +303,14 @@ fn engagement_detail(
     let findings_count = view.findings.len().to_string();
     let abort_text = view.abort_reason.clone().unwrap_or_default();
     let budget_text = view.budget_exhausted.clone().unwrap_or_default();
+
+    // Export links are plain anchors: the API serves the formats directly.
+    let engagement_id = api.selected.read().clone().unwrap_or_default();
+    let export_base = format!(
+        "{}/api/engagements/{}/export",
+        base_url(&api),
+        engagement_id
+    );
 
     rsx! {
         section { style: MAIN_STYLE,
@@ -403,11 +420,20 @@ fn engagement_detail(
                     }
                 }
             }
+
+            section { style: CARD_STYLE,
+                h2 { style: SECTION_TITLE_STYLE, "Export" }
+                div { style: "display:flex;gap:10px;flex-wrap:wrap;",
+                    a { style: LINK_STYLE, href: "{export_base}/sarif", "SARIF" }
+                    a { style: LINK_STYLE, href: "{export_base}/cyclonedx", "CycloneDX" }
+                    a { style: LINK_STYLE, href: "{export_base}/mitre", "MITRE" }
+                }
+            }
         }
     }
 }
 
-fn approval_queue(approvals: Signal<Vec<PendingApproval>>, api: ApiState) -> Element {
+pub fn approval_queue(approvals: Signal<Vec<PendingApproval>>, api: ApiState) -> Element {
     let pending = approvals();
 
     rsx! {
@@ -457,7 +483,7 @@ fn approval_queue(approvals: Signal<Vec<PendingApproval>>, api: ApiState) -> Ele
     }
 }
 
-fn status_card(label: &str, value: &str, accent: bool) -> Element {
+pub fn status_card(label: &str, value: &str, accent: bool) -> Element {
     let value_style = if accent {
         "font-size:18px;font-weight:700;color:#ff4d5e;margin-top:6px;word-break:break-word;"
     } else {

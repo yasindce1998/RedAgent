@@ -17,7 +17,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::anyhow;
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{header, StatusCode};
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -59,6 +59,8 @@ pub struct RunRequest {
     pub max_tool_calls: usize,
     #[serde(default = "default_max_intents")]
     pub max_intents: usize,
+    #[serde(default)]
+    pub retest: bool,
 }
 
 pub fn default_max() -> usize {
@@ -317,6 +319,37 @@ async fn get_report(
         .map_err(|e| ApiError::Internal(format!("cannot render report: {e}")))
 }
 
+async fn export_engagement(
+    State(state): State<AppState>,
+    Path((id, format)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    let path = ledger_path(&state, &id)?;
+    if !path.is_file() {
+        return Err(ApiError::NotFound(format!("engagement '{id}' not found")));
+    }
+    let view = redagent_app::load_view(&path)
+        .map_err(|e| ApiError::Internal(format!("cannot load engagement: {e}")))?;
+    let format: redagent_export::ExportFormat = format
+        .parse()
+        .map_err(|e| ApiError::BadRequest(format!("unsupported export format: {e}")))?;
+    let content = redagent_export::export(&view, format)
+        .map_err(|e| ApiError::Internal(format!("export failed: {e}")))?;
+    let filename = redagent_export::filename(&view, format);
+    Ok((
+        [
+            (
+                header::CONTENT_TYPE,
+                redagent_export::content_type(format).to_string(),
+            ),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{filename}\""),
+            ),
+        ],
+        content,
+    ))
+}
+
 async fn stream_engagement(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -392,7 +425,8 @@ async fn create_engagement(
         state.inner.config.redhands_binary.clone(),
         ledger_path,
     )
-    .with_limits(request.max_tool_calls, request.max_intents);
+    .with_limits(request.max_tool_calls, request.max_intents)
+    .with_retest(request.retest);
 
     if request.llm {
         let api_key = std::env::var("REDAGENT_LLM_API_KEY").ok();
@@ -447,6 +481,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/engagements/{id}", get(get_engagement))
         .route("/api/engagements/{id}/events", get(get_events))
         .route("/api/engagements/{id}/report", get(get_report))
+        .route(
+            "/api/engagements/{id}/export/{format}",
+            get(export_engagement),
+        )
         .route("/api/engagements/{id}/stream", get(stream_engagement))
         .route("/api/approvals", get(list_approvals))
         .route("/api/approvals/{request_id}", post(decide_approval))

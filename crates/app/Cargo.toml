@@ -9,6 +9,7 @@ authors.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true
 redagent-core = { path = "../core" }
+redagent-evidence = { path = "../evidence" }
 redagent-agent = { path = "../agent" }
 redagent-guard = { path = "../guard" }
 redagent-llm = { path = "../llm" }

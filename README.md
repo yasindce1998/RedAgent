@@ -28,10 +28,12 @@ RedHands exposes capabilities. RedAgent decides **what to try next**, remembers 
 | 🔗 **MCP-native execution** | Every action is a structured `tools/call` to RedHands — the same argv validation, approval policy and engagement scope operators already trust. |
 | 🧾 **Receipts by default** | An append-only, hash-chained ledger records each intent, guard decision, tool result and finding. Reports are projections — audit is not an afterthought. |
 | 🛡️ **Guardrails in code** | Allowlists and hard budgets are enforced before a call leaves the process, not hoped for in a prompt. |
-| 🖥️ **Native control room** | A Dioxus desktop UI and an Axum REST/SSE API stream live projections and route approval prompts to the operator — no web frontend, no database server. |
+| 🧾 **Evidence with receipts** | Every tool output is stored as a content-addressed blob and linked from the ledger; `--retest` re-runs tools to confirm findings. |
+| 📤 **Enterprise-ready exports** | SARIF 2.1.0, CycloneDX 1.5 and MITRE ATT&CK Navigator layers generated from the same projection data. |
+| 🖥️ **Native + web control room** | Dioxus desktop and WASM web UIs share components; an Axum REST/SSE API streams projections and routes approvals — no Node, no database server. |
 | ⚡ **Two planes, one protocol** | Go stays where it shines (the tool plane); Rust owns the control plane and the native UI. One protocol between them: MCP. |
 
-> **Status:** Phase 2 shipped. Alongside the Phase 1 autonomous loop, RedAgent now has a native Dioxus desktop UI and an Axum REST/SSE control API for live engagement monitoring and operator approvals.
+> **Status:** Phase 3 shipped. Engagements now carry content-addressed evidence blobs, a retest loop, SARIF/CycloneDX/MITRE exports, and a Dioxus WASM web console alongside the native UI.
 
 ## How it works
 
@@ -78,6 +80,21 @@ Gated RedHands tools return an inline `input_required` result. By default RedAge
 
 The engine spawns RedHands over stdio with a minimal toolset and redirects every state directory next to the ledger — your working directory stays clean, and the resulting `.db` is a portable, verifiable engagement record.
 
+### Evidence & exports (Phase 3)
+
+```sh
+# Re-run each tool after verification and record a retest verdict
+./target/release/redagent run "..." --retest \
+  --redhands /path/to/redhands --ledger engagement.db
+
+# Machine-readable exports from any engagement ledger
+./target/release/redagent export --ledger engagement.db --format sarif --output findings.sarif
+./target/release/redagent export --ledger engagement.db --format cyclonedx
+./target/release/redagent export --ledger engagement.db --format mitre
+```
+
+Tool outputs are stored as SHA-256 blobs under `evidence_blobs/` next to the ledger and referenced by hash in the audit trail. Retests record `still_reproducible`, `fixed` or `cannot_confirm` verdicts.
+
 ### Control room (Phase 2)
 
 ```sh
@@ -85,8 +102,10 @@ The engine spawns RedHands over stdio with a minimal toolset and redirects every
 ./target/release/redagent serve --redhands /path/to/redhands \
   --ledger-dir ./engagements --bind 127.0.0.1:8787
 
-# Terminal 2: native Dioxus desktop UI
+# Terminal 2: native Dioxus desktop UI, or the WASM web console
 cargo run --release -p redagent-ui
+cargo build --release -p redagent-ui --no-default-features --features web \
+  --bin redagent-ui-web --target wasm32-unknown-unknown
 ```
 
 The UI lists engagements, streams live ledger projections over SSE (with polling fallback), shows findings and verifications, and lets an operator approve or deny gated tools in flight. The server also exposes plain HTTP endpoints for SOAR/scripting:
@@ -98,6 +117,7 @@ The UI lists engagements, streams live ledger projections over SSE (with polling
 | `GET /api/engagements/{id}` | projection JSON |
 | `GET /api/engagements/{id}/events` | raw ledger events |
 | `GET /api/engagements/{id}/report` | Markdown report |
+| `GET /api/engagements/{id}/export/{format}` | SARIF / CycloneDX / MITRE / Markdown download |
 | `GET /api/engagements/{id}/stream` | SSE projection stream |
 | `GET /api/approvals` | pending approvals |
 | `POST /api/approvals/{id}` | approve / deny |
@@ -121,10 +141,12 @@ See [ADR 0001](docs/adr/0001-architecture.md) for the full decision record.
 | `redagent-llm` | OpenAI-compatible JSON chat client |
 | `redagent-agent` | `Planner` trait, deterministic + LLM planners |
 | `redagent-guard` | Tool allowlist and call budget |
-| `redagent-app` | Engine: approval elicitation, verifier, single wiring point |
+| `redagent-evidence` | Content-addressed SHA-256 blob store |
+| `redagent-app` | Engine: approvals, verifier, retest, single wiring point |
+| `redagent-export` | SARIF / CycloneDX / MITRE Navigator / Markdown |
 | `redagent-api` | Axum REST + SSE control API, in-flight approval queue |
-| `redagent-ui` | Native Dioxus desktop control room |
-| `redagent-cli` | `run` / `report` / `verify` / `serve` |
+| `redagent-ui` | Shared Dioxus components + native desktop and WASM web binaries |
+| `redagent-cli` | `run` / `report` / `verify` / `export` / `serve` |
 
 CI runs format, clippy, tests and release builds on Linux, macOS and Windows, plus a **live-e2e job** that downloads RedHands v0.6.3 with its published SHA-256 and drives the complete loop against the real Go server.
 
@@ -135,7 +157,7 @@ CI runs format, clippy, tests and release builds on Linux, macOS and Windows, pl
 | 0 | Ledger, typed intent, MCP loop, guard, CLI, CI | ✅ shipped |
 | 1 | LLM planner, verifier, approval elicitation, budgets | ✅ shipped |
 | 2 | Dioxus desktop UI + Axum REST/SSE projections | ✅ shipped |
-| 3 | Evidence blobs, retest loop, exports, Dioxus WASM web console | planned |
+| 3 | Evidence blobs, retest loop, exports, Dioxus WASM web console | ✅ shipped |
 | 4 | RBAC/KMS, OTel, WASM plugins (only if measured) | planned |
 
 ## Legal & license

@@ -15,4 +15,5 @@ clap.workspace = true
 redagent-app = { path = "../app" }
 redagent-api = { path = "../api" }
 redagent-core = { path = "../core" }
+redagent-export = { path = "../export" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

@@ -28,6 +28,18 @@ jobs:
       - name: Release build
         run: cargo build --release --workspace
 
+  web-ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+      - name: Check WASM web console
+        run: cargo check -p redagent-ui --no-default-features --features web --bin redagent-ui-web --target wasm32-unknown-unknown
+
   live-e2e:
     runs-on: ubuntu-latest
     steps:
