@@ -5,6 +5,7 @@
 //! on read so that a caller can never escape the store with a crafted path.
 
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
@@ -42,20 +43,47 @@ impl EvidenceStore {
     }
 
     /// Read the blob identified by `hash`. Invalid digests are rejected before
-    /// any filesystem access, so path traversal is impossible.
+    /// any filesystem access, so path traversal is impossible. The bytes on
+    /// disk are hashed again: a truncated or corrupted blob is reported as an
+    /// error instead of being returned as if it were valid evidence.
     pub fn get(&self, hash: &str) -> Result<String> {
         validate_hash(hash)?;
         let path = self.path(hash);
-        fs::read_to_string(&path)
-            .with_context(|| format!("reading evidence blob {}", path.display()))
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(anyhow!(
+                    "evidence blob {hash} not found in store at {}",
+                    self.root.display()
+                ));
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("reading evidence blob {hash} at {}", path.display())
+                });
+            }
+        };
+
+        let actual = hex::encode(Sha256::digest(&bytes));
+        if actual != hash {
+            return Err(anyhow!(
+                "evidence blob {hash} is corrupt: on-disk content hashes to {actual}"
+            ));
+        }
+        String::from_utf8(bytes).with_context(|| format!("evidence blob {hash} is not valid UTF-8"))
     }
 
     /// The on-disk location for `hash`: `root/<first2>/<hash>.txt`.
     ///
-    /// This is a pure path builder; [`Self::get`] validates the digest first.
+    /// This is a pure path builder and never touches the filesystem. Invalid
+    /// digests are mapped to an inert, root-contained placeholder path so this
+    /// method cannot escape the store even if a caller passes untrusted input;
+    /// [`Self::get`] rejects such digests with a clear error before reading.
     pub fn path(&self, hash: &str) -> PathBuf {
-        let prefix = hash.get(..2).unwrap_or("");
-        self.root.join(prefix).join(format!("{hash}.txt"))
+        if validate_hash(hash).is_err() {
+            return self.root.join("invalid-hash").join("invalid.txt");
+        }
+        self.root.join(&hash[..2]).join(format!("{hash}.txt"))
     }
 
     /// The root directory of this store.
@@ -142,9 +170,48 @@ mod tests {
                 .is_err(),
             "non-hex hash"
         );
+        assert!(
+            store
+                .get("ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789")
+                .is_err(),
+            "uppercase hash"
+        );
         let traversal = format!("{}x", "../".repeat(21));
         assert_eq!(traversal.len(), 64);
         assert!(store.get(&traversal).is_err(), "traversal hash");
+        // The public path builder must never produce an escaping path either.
+        let path = store.path(&traversal);
+        assert!(path.starts_with(store.root()), "{:?} escapes root", path);
+        assert!(!path.components().any(|c| c.as_os_str() == ".."));
+    }
+
+    #[test]
+    fn get_reports_missing_blob_clearly() {
+        let (_dir, store) = store();
+        let hash = "ab".repeat(32);
+        let err = store.get(&hash).unwrap_err().to_string();
+        assert!(err.contains(&hash), "{err}");
+        assert!(err.contains("not found"), "{err}");
+    }
+
+    #[test]
+    fn get_rejects_corrupt_blob() {
+        let (_dir, store) = store();
+        let hash = store.put("original content").unwrap();
+        fs::write(store.path(&hash), "tampered content").unwrap();
+        let err = store.get(&hash).unwrap_err().to_string();
+        assert!(err.contains("corrupt"), "{err}");
+        assert!(err.contains(&hash), "{err}");
+    }
+
+    #[test]
+    fn get_rejects_partial_blob() {
+        let (_dir, store) = store();
+        let content = "a tool output long enough to be truncated into a partial write";
+        let hash = store.put(content).unwrap();
+        fs::write(store.path(&hash), &content[..12]).unwrap();
+        let err = store.get(&hash).unwrap_err().to_string();
+        assert!(err.contains("corrupt"), "{err}");
     }
 
     #[test]
