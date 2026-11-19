@@ -4,15 +4,37 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+default-run = "redagent-ui-native"
+
+[lib]
+name = "redagent_ui"
+path = "src/lib.rs"
 
 [[bin]]
-name = "redagent-ui"
-path = "src/main.rs"
+name = "redagent-ui-native"
+path = "src/bin/native.rs"
+required-features = ["native"]
+
+[[bin]]
+name = "redagent-ui-web"
+path = "src/bin/web.rs"
+required-features = ["web"]
+
+[features]
+default = ["native"]
+native = ["dioxus/native", "dep:tokio"]
+web = ["dioxus/web", "dep:gloo-timers"]
 
 [dependencies]
-dioxus = { version = "0.7", features = ["native"] }
 reqwest = { version = "0.12", features = ["json"] }
 serde.workspace = true
 serde_json.workspace = true
 redagent-core = { path = "../core" }
-tokio = { version = "1", features = ["time"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+dioxus = { version = "0.7", features = ["native"] }
+tokio = { version = "1", features = ["time"], optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+dioxus = { version = "0.7", features = ["web"] }
+gloo-timers = { version = "0.3", features = ["futures"], optional = true }
