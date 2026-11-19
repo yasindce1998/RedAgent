@@ -40,6 +40,26 @@ jobs:
       - name: Check WASM web console
         run: cargo check -p redagent-ui --no-default-features --features web --bin redagent-ui-web --target wasm32-unknown-unknown
 
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cargo deny (licenses / duplicate versions)
+        uses: EmbarkStudios/cargo-deny-action@v2
+      # cargo-deny checks the same RustSec advisory DB, so no second audit step.
+
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Fuzz ledger payload parser (30s)
+        working-directory: fuzz
+        run: cargo fuzz run ledger_payload -- -max_total_time=30
+
   live-e2e:
     runs-on: ubuntu-latest
     steps:

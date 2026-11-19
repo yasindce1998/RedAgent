@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "2"
 
 [workspace.package]
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
 license = "MIT"
 authors = ["Mohammed Yasin"]
@@ -19,3 +19,4 @@ rusqlite = { version = "0.43", features = ["bundled"] }
 clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
 tempfile = "3"
+tracing = "0.1"

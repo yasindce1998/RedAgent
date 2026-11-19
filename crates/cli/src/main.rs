@@ -1,9 +1,40 @@
 use std::path::PathBuf;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use redagent_app::{report_markdown, run, Config, LlmConfig};
 use redagent_core::Ledger;
+use redagent_scope::{PolicyRule, Scope};
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize)]
+struct ScopeConfig {
+    #[serde(default)]
+    cidrs: Vec<String>,
+    #[serde(default)]
+    domains: Vec<String>,
+    #[serde(default)]
+    ports: Vec<u16>,
+    #[serde(default)]
+    rules: Vec<PolicyRule>,
+    #[serde(default)]
+    target_paths: Vec<String>,
+}
+
+fn apply_scope_file(mut config: Config, path: Option<&PathBuf>) -> Result<Config> {
+    let Some(path) = path else {
+        return Ok(config);
+    };
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading scope file {}", path.display()))?;
+    let scope: ScopeConfig = serde_json::from_str(&text)
+        .with_context(|| format!("parsing scope file {}", path.display()))?;
+    config = config
+        .with_scope(Scope::new(scope.cidrs, scope.domains, scope.ports)?)
+        .with_rules(scope.rules)
+        .with_target_paths(scope.target_paths);
+    Ok(config)
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -57,6 +88,15 @@ enum Command {
         /// Without this, only the explicitly allowlisted tools may run.
         #[arg(long)]
         allow_read_only: bool,
+        /// JSON file declaring scope (cidrs/domains/ports), rules and target paths.
+        #[arg(long)]
+        scope_file: Option<PathBuf>,
+        /// Fail closed when no scope is declared.
+        #[arg(long)]
+        require_scope: bool,
+        /// Disable tool-output injection signal detection.
+        #[arg(long)]
+        no_injection_guard: bool,
     },
     /// Export an engagement as SARIF, CycloneDX, MITRE Navigator or Markdown.
     Export {
@@ -135,11 +175,17 @@ fn main() -> Result<()> {
             retest,
             toolsets,
             allow_read_only,
+            scope_file,
+            require_scope,
+            no_injection_guard,
         } => {
             let mut config = Config::new(goal, redhands, ledger.clone())
                 .with_limits(max_tool_calls, max_intents)
                 .with_retest(retest)
-                .with_toolsets(toolsets);
+                .with_toolsets(toolsets)
+                .with_required_scope(require_scope)
+                .with_injection_guard(!no_injection_guard);
+            config = apply_scope_file(config, scope_file.as_ref())?;
             if allow_read_only {
                 config = config.with_allowed_tools(Vec::<String>::new());
             }

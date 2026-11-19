@@ -99,6 +99,7 @@ pub struct PendingApproval {
     pub intent_id: String,
     pub tool: String,
     pub message: String,
+    pub proposal: Option<redagent_core::CallProposal>,
 }
 
 /// Body of `POST /api/engagements`. The RedHands path is intentionally absent:
@@ -814,6 +815,7 @@ pub fn approval_queue(approvals: Signal<Vec<PendingApproval>>, api: ApiState) ->
                             let intent_id = item.intent_id.clone();
                             let tool = item.tool.clone();
                             let message = item.message.clone();
+                            let proposal = item.proposal.clone();
                             // Once a decision is in flight, disable both
                             // buttons so a double-click cannot POST twice.
                             let busy = in_flight.iter().any(|pending| pending == &request_id);
@@ -834,6 +836,22 @@ pub fn approval_queue(approvals: Signal<Vec<PendingApproval>>, api: ApiState) ->
                                         span { style: format!("{MONO_STYLE};color:#9ad4ff;"), "{tool} · {intent_id}" }
                                     }
                                     div { style: "font-size:12px;color:#c3cee2;margin-top:10px;line-height:1.5;", "{message}" }
+                                    if let Some(proposal) = proposal {
+                                        div { style: "background:#080d18;border:1px solid #23304c;border-radius:10px;padding:11px;margin-top:10px;",
+                                            div { style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
+                                                span { style: format!("{PILL_BASE};background:#1b2740;color:#9ad4ff;border:1px solid #2b3d5c;"), "SCOPE: {proposal.scope_verdict}" }
+                                                for flag in proposal.risk_flags.iter() {
+                                                    { let flag = flag.clone(); rsx! { span { style: format!("{PILL_BASE};background:#3a1420;color:#ff9aa6;border:1px solid #ff4d5e;"), "{flag}" } } }
+                                                }
+                                            }
+                                            div { style: "font-size:10px;letter-spacing:1.2px;color:#8492ad;text-transform:uppercase;font-weight:700;margin-top:10px;", "Exact arguments" }
+                                            pre { style: format!("{PRE_STYLE};margin-top:6px;max-height:160px;"), "{proposal.arguments}" }
+                                            if let Some(diff) = proposal.diff {
+                                                div { style: "font-size:10px;letter-spacing:1.2px;color:#8492ad;text-transform:uppercase;font-weight:700;margin-top:10px;", "Change since previous call" }
+                                                pre { style: format!("{PRE_STYLE};margin-top:6px;max-height:120px;"), "{diff}" }
+                                            }
+                                        }
+                                    }
                                     div { style: "display:flex;gap:8px;margin-top:12px;",
                                         button {
                                             style: approve_style,

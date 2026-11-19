@@ -5206,6 +5206,7 @@ dependencies = [
  "redagent-app",
  "redagent-core",
  "redagent-export",
+ "redagent-scope",
  "serde",
  "serde_json",
  "tempfile",
@@ -5224,8 +5225,10 @@ dependencies = [
  "redagent-guard",
  "redagent-llm",
  "redagent-mcp",
+ "redagent-scope",
  "serde_json",
  "tempfile",
+ "tracing",
 ]
 
 [[package]]
@@ -5238,6 +5241,9 @@ dependencies = [
  "redagent-app",
  "redagent-core",
  "redagent-export",
+ "redagent-scope",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 
@@ -5278,6 +5284,10 @@ dependencies = [
 [[package]]
 name = "redagent-guard"
 version = "0.3.1"
+dependencies = [
+ "redagent-scope",
+ "serde_json",
+]
 
 [[package]]
 name = "redagent-llm"
@@ -5297,6 +5307,17 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "redagent-scope"
+version = "0.3.1"
+dependencies = [
+ "anyhow",
+ "ipnet",
+ "serde",
+ "serde_json",
+ "url",
 ]
 
 [[package]]

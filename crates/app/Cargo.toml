@@ -12,8 +12,10 @@ redagent-core = { path = "../core" }
 redagent-evidence = { path = "../evidence" }
 redagent-agent = { path = "../agent" }
 redagent-guard = { path = "../guard" }
+redagent-scope = { path = "../scope" }
 redagent-llm = { path = "../llm" }
 redagent-mcp = { path = "../mcp" }
+tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
