@@ -82,6 +82,96 @@ pub struct ApiState {
     pub approvals: Signal<Vec<PendingApproval>>,
     pub error: Signal<Option<String>>,
     pub connected: Signal<Option<String>>,
+    /// Incremented at the start of every refresh/mutation. Async responses
+    /// from an older generation are discarded so a slow request can never
+    /// overwrite the result of a newer selection or clear a newer error.
+    epoch: Signal<u64>,
+    /// Approval request ids whose decision POST is currently in flight. Used
+    /// to debounce the approve/deny buttons.
+    decisions: Signal<Vec<String>>,
+}
+
+/// Ids interpolated into API paths must match the server's `checked_id`
+/// allow-list. This rejects `/`, `..`, NUL bytes, quotes and whitespace
+/// before a URL is ever built.
+fn valid_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// RFC 3986 unreserved percent-encoding for a single path segment.
+fn percent_encode_segment(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for &byte in value.as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
+/// Validate and encode an id for use as one URL path segment.
+fn checked_segment(label: &str, id: &str) -> Result<String, String> {
+    if !valid_id(id) {
+        return Err(format!(
+            "invalid {label} '{id}': expected characters [A-Za-z0-9_-]"
+        ));
+    }
+    Ok(percent_encode_segment(id))
+}
+
+fn engagement_api_url(base: &str, id: &str) -> Result<String, String> {
+    Ok(format!(
+        "{}/api/engagements/{}",
+        base.trim_end_matches('/'),
+        checked_segment("engagement id", id)?
+    ))
+}
+
+fn approval_api_url(base: &str, request_id: &str) -> Result<String, String> {
+    Ok(format!(
+        "{}/api/approvals/{}",
+        base.trim_end_matches('/'),
+        checked_segment("approval request id", request_id)?
+    ))
+}
+
+fn export_base_url(base: &str, id: &str) -> Result<String, String> {
+    Ok(format!(
+        "{}/api/engagements/{}/export",
+        base.trim_end_matches('/'),
+        checked_segment("engagement id", id)?
+    ))
+}
+
+/// Register an in-flight decision; `false` means one is already pending for
+/// `id`, so the caller should ignore a repeated click.
+fn begin_decision(in_flight: &mut Vec<String>, id: &str) -> bool {
+    if in_flight.iter().any(|pending| pending == id) {
+        return false;
+    }
+    in_flight.push(id.to_string());
+    true
+}
+
+fn finish_decision(in_flight: &mut Vec<String>, id: &str) {
+    in_flight.retain(|pending| pending != id);
+}
+
+/// Start a new async generation and return its id. Older generations must
+/// check [`is_current`] before writing any shared state.
+fn begin_refresh(state: &mut ApiState) -> u64 {
+    let mut epoch = state.epoch.write();
+    *epoch = epoch.wrapping_add(1);
+    *epoch
+}
+
+fn is_current(current: u64, epoch: u64) -> bool {
+    current == epoch
 }
 
 /// Root component shared by the native and web shells.
@@ -93,6 +183,8 @@ pub fn app() -> Element {
     let approvals = use_signal(Vec::<PendingApproval>::new);
     let error = use_signal(|| None::<String>);
     let connected = use_signal(|| None::<String>);
+    let epoch = use_signal(|| 0_u64);
+    let decisions = use_signal(Vec::<String>::new);
     let goal = use_signal(String::new);
     let redhands_path = use_signal(String::new);
     let llm = use_signal(|| false);
@@ -106,6 +198,8 @@ pub fn app() -> Element {
         approvals,
         error,
         connected,
+        epoch,
+        decisions,
     };
 
     // Background polling: refetch everything roughly every 1.5 seconds.
@@ -305,12 +399,13 @@ pub fn engagement_detail(
     let budget_text = view.budget_exhausted.clone().unwrap_or_default();
 
     // Export links are plain anchors: the API serves the formats directly.
-    let engagement_id = api.selected.read().clone().unwrap_or_default();
-    let export_base = format!(
-        "{}/api/engagements/{}/export",
-        base_url(&api),
-        engagement_id
-    );
+    // Only build them for a validated selection so a malformed id can never
+    // produce a broken (or injected) href.
+    let export_base = api
+        .selected
+        .read()
+        .as_deref()
+        .and_then(|id| export_base_url(&base_url(&api), id).ok());
 
     rsx! {
         section { style: MAIN_STYLE,
@@ -423,10 +518,14 @@ pub fn engagement_detail(
 
             section { style: CARD_STYLE,
                 h2 { style: SECTION_TITLE_STYLE, "Export" }
-                div { style: "display:flex;gap:10px;flex-wrap:wrap;",
-                    a { style: LINK_STYLE, href: "{export_base}/sarif", "SARIF" }
-                    a { style: LINK_STYLE, href: "{export_base}/cyclonedx", "CycloneDX" }
-                    a { style: LINK_STYLE, href: "{export_base}/mitre", "MITRE" }
+                if let Some(export_base) = export_base {
+                    div { style: "display:flex;gap:10px;flex-wrap:wrap;",
+                        a { style: LINK_STYLE, href: "{export_base}/sarif", "SARIF" }
+                        a { style: LINK_STYLE, href: "{export_base}/cyclonedx", "CycloneDX" }
+                        a { style: LINK_STYLE, href: "{export_base}/mitre", "MITRE" }
+                    }
+                } else {
+                    p { style: MUTED_STYLE, "Invalid engagement id; export unavailable." }
                 }
             }
         }
@@ -435,6 +534,8 @@ pub fn engagement_detail(
 
 pub fn approval_queue(approvals: Signal<Vec<PendingApproval>>, api: ApiState) -> Element {
     let pending = approvals();
+    // Subscribing here makes the buttons update as decisions start/finish.
+    let in_flight = (api.decisions)();
 
     rsx! {
         section { style: CARD_STYLE,
@@ -451,13 +552,27 @@ pub fn approval_queue(approvals: Signal<Vec<PendingApproval>>, api: ApiState) ->
                             let intent_id = item.intent_id.clone();
                             let tool = item.tool.clone();
                             let message = item.message.clone();
+                            // Once a decision is in flight, disable both
+                            // buttons so a double-click cannot POST twice.
+                            let busy = in_flight.iter().any(|pending| pending == &request_id);
+                            let approve_style = if busy {
+                                "background:#3a2a30;color:#8b7680;border:none;border-radius:8px;padding:9px 14px;font-weight:700;cursor:not-allowed;"
+                            } else {
+                                PRIMARY_BUTTON_STYLE
+                            };
+                            let deny_style = if busy {
+                                "background:#232d44;color:#6b5560;border:1px solid #55404a;border-radius:8px;padding:9px 14px;font-weight:700;cursor:not-allowed;"
+                            } else {
+                                DENY_BUTTON_STYLE
+                            };
                             rsx! {
                                 div { key: "{request_id}", style: "background:#0f1628;border:1px solid #ff4d5e;border-radius:10px;padding:12px;",
                                     div { style: "font-size:13px;color:#ff9aa6;font-weight:700;", "{tool} · {intent_id}" }
                                     div { style: MUTED_STYLE, "{message}" }
                                     div { style: "display:flex;gap:8px;margin-top:10px;",
                                         button {
-                                            style: PRIMARY_BUTTON_STYLE,
+                                            style: approve_style,
+                                            disabled: busy,
                                             onclick: move |_| {
                                                 let id = approve_id.clone();
                                                 spawn(async move { decide_approval(api, id, true).await; });
@@ -465,7 +580,8 @@ pub fn approval_queue(approvals: Signal<Vec<PendingApproval>>, api: ApiState) ->
                                             "Approve"
                                         }
                                         button {
-                                            style: DENY_BUTTON_STYLE,
+                                            style: deny_style,
+                                            disabled: busy,
                                             onclick: move |_| {
                                                 let id = deny_id.clone();
                                                 spawn(async move { decide_approval(api, id, false).await; });
@@ -528,12 +644,22 @@ where
 
 /// One polling pass. Every failure is accumulated into the error banner; no
 /// fetch failure is ever fatal to the UI.
+///
+/// A generation counter guards every write: if a newer refresh (or a
+/// mutation such as approve/deny) started while we were awaiting a response,
+/// this pass is stale and discards its result instead of overwriting newer
+/// state or clearing a newer error.
 async fn refresh_all(mut state: ApiState) {
+    let epoch = begin_refresh(&mut state);
     let client = reqwest::Client::new();
     let base = base_url(&state);
     let mut problems: Vec<String> = Vec::new();
 
-    match get_json::<Health>(&client, format!("{base}/api/health")).await {
+    let health = get_json::<Health>(&client, format!("{base}/api/health")).await;
+    if !is_current((state.epoch)(), epoch) {
+        return;
+    }
+    match health {
         Ok(health) if health.status == "ok" => state.connected.set(Some(health.version)),
         Ok(health) => {
             state.connected.set(None);
@@ -545,7 +671,11 @@ async fn refresh_all(mut state: ApiState) {
         }
     }
 
-    match get_json::<Vec<String>>(&client, format!("{base}/api/engagements")).await {
+    let list = get_json::<Vec<String>>(&client, format!("{base}/api/engagements")).await;
+    if !is_current((state.epoch)(), epoch) {
+        return;
+    }
+    match list {
         Ok(list) => {
             let keep = state
                 .selected
@@ -565,21 +695,45 @@ async fn refresh_all(mut state: ApiState) {
 
     let current = state.selected.read().clone();
     match current {
-        Some(id) => {
-            match get_json::<EngagementView>(&client, format!("{base}/api/engagements/{id}")).await
-            {
-                Ok(view) => state.detail.set(Some(view)),
-                Err(err) => problems.push(err),
+        Some(id) => match engagement_api_url(&base, &id) {
+            Err(err) => {
+                // A malformed selection is surfaced in the error banner and
+                // never turned into a broken HTTP request.
+                problems.push(err);
+                state.detail.set(None);
             }
-        }
+            Ok(url) => {
+                let detail = get_json::<EngagementView>(&client, url).await;
+                if !is_current((state.epoch)(), epoch) {
+                    return;
+                }
+                match detail {
+                    Ok(view) => {
+                        // The user may have selected another engagement while
+                        // this request was in flight. Only apply the detail if
+                        // it still belongs to the current selection.
+                        if state.selected.read().as_deref() == Some(id.as_str()) {
+                            state.detail.set(Some(view));
+                        }
+                    }
+                    Err(err) => problems.push(err),
+                }
+            }
+        },
         None => state.detail.set(None),
     }
 
-    match get_json::<Vec<PendingApproval>>(&client, format!("{base}/api/approvals")).await {
+    let approvals =
+        get_json::<Vec<PendingApproval>>(&client, format!("{base}/api/approvals")).await;
+    if !is_current((state.epoch)(), epoch) {
+        return;
+    }
+    match approvals {
         Ok(list) => state.approvals.set(list),
         Err(err) => problems.push(err),
     }
 
+    // Only the newest generation is allowed to clear or set the banner.
     if problems.is_empty() {
         state.error.set(None);
     } else {
@@ -588,17 +742,45 @@ async fn refresh_all(mut state: ApiState) {
 }
 
 async fn decide_approval(mut state: ApiState, request_id: String, approved: bool) {
-    let client = reqwest::Client::new();
     let base = base_url(&state);
-    let url = format!("{base}/api/approvals/{request_id}");
+    let url = match approval_api_url(&base, &request_id) {
+        Ok(url) => url,
+        Err(err) => {
+            state.error.set(Some(err));
+            return;
+        }
+    };
+
+    // Debounce approve/deny: ignore a repeated click while one POST is already
+    // in flight for the same request id.
+    {
+        let mut in_flight = state.decisions.write();
+        if !begin_decision(&mut in_flight, &request_id) {
+            return;
+        }
+    }
+
+    let epoch = begin_refresh(&mut state);
+    let client = reqwest::Client::new();
     let payload = serde_json::json!({
         "approved": approved,
         "decided_by": "operator",
     });
+    let result = client.post(url.as_str()).json(&payload).send().await;
 
-    match client.post(url.as_str()).json(&payload).send().await {
+    // Always clear the in-flight marker, including on error paths.
+    {
+        let mut in_flight = state.decisions.write();
+        finish_decision(&mut in_flight, &request_id);
+    }
+    if !is_current((state.epoch)(), epoch) {
+        return;
+    }
+
+    match result {
         Ok(response) if response.status().is_success() => {
-            state.error.set(None);
+            // refresh_all starts its own generation and repaints everything,
+            // including removing the decided approval from the queue.
             refresh_all(state).await;
         }
         Ok(response) => {
@@ -612,14 +794,22 @@ async fn decide_approval(mut state: ApiState, request_id: String, approved: bool
 }
 
 async fn start_engagement(mut state: ApiState, form: RunForm) {
+    let epoch = begin_refresh(&mut state);
     let client = reqwest::Client::new();
     let base = base_url(&state);
     let url = format!("{base}/api/engagements");
 
-    match client.post(url.as_str()).json(&form).send().await {
+    let result = client.post(url.as_str()).json(&form).send().await;
+    if !is_current((state.epoch)(), epoch) {
+        return;
+    }
+    match result {
         Ok(response) if response.status().is_success() => {
             match response.json::<EngagementView>().await {
                 Ok(view) => {
+                    if !is_current((state.epoch)(), epoch) {
+                        return;
+                    }
                     state.detail.set(Some(view));
                     state.error.set(None);
                     refresh_all(state).await;
@@ -636,5 +826,100 @@ async fn start_engagement(mut state: ApiState, form: RunForm) {
             )));
         }
         Err(err) => state.error.set(Some(format!("POST {url} failed: {err}"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn valid_id_matches_api_allow_list() {
+        for id in ["demo", "eng-1", "eng_2", "A0_-9", "0123456789abcdef"] {
+            assert!(valid_id(id), "{id} should be valid");
+        }
+        for id in [
+            "", "..", ".", "a/b", "a\\b", "a b", "a%2Fb", "a\0b", "a\r\nb", "a\"b", "a#b", "a?b",
+            "é",
+        ] {
+            assert!(!valid_id(id), "{id:?} should be invalid");
+        }
+    }
+
+    #[test]
+    fn engagement_url_validates_and_encodes() {
+        assert_eq!(
+            engagement_api_url("http://host:8787/", "demo").unwrap(),
+            "http://host:8787/api/engagements/demo"
+        );
+        assert_eq!(
+            engagement_api_url("http://host:8787///", "eng_1").unwrap(),
+            "http://host:8787/api/engagements/eng_1"
+        );
+        for bad in ["..", "a/b", "%2e%2e", "a\0b", "a b"] {
+            assert!(
+                engagement_api_url("http://host", bad).is_err(),
+                "{bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn approval_url_validates_and_encodes() {
+        assert_eq!(
+            approval_api_url("http://host", "0123456789abcdef").unwrap(),
+            "http://host/api/approvals/0123456789abcdef"
+        );
+        for bad in ["", "..", "a/b", "a\0b"] {
+            assert!(
+                approval_api_url("http://host", bad).is_err(),
+                "{bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn export_base_url_validates_and_encodes() {
+        assert_eq!(
+            export_base_url("http://host/", "demo").unwrap(),
+            "http://host/api/engagements/demo/export"
+        );
+        for bad in ["..", "a/b", "a\"b", "a\r\nX: y"] {
+            assert!(
+                export_base_url("http://host", bad).is_err(),
+                "{bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn percent_encoding_only_touches_unreserved_bytes() {
+        // valid ids contain only unreserved bytes, so encoding is a no-op;
+        // the helper still encodes anything unexpected for defence in depth.
+        assert_eq!(percent_encode_segment("a-b_C.9"), "a-b_C.9");
+        assert_eq!(percent_encode_segment("a b/c"), "a%20b%2Fc");
+    }
+
+    #[test]
+    fn decision_tracker_debounces_and_clears() {
+        let mut in_flight = Vec::new();
+        assert!(begin_decision(&mut in_flight, "req-1"));
+        assert!(!begin_decision(&mut in_flight, "req-1"));
+        assert!(begin_decision(&mut in_flight, "req-2"));
+        assert_eq!(in_flight, vec!["req-1", "req-2"]);
+        finish_decision(&mut in_flight, "req-1");
+        assert_eq!(in_flight, vec!["req-2"]);
+        // Idempotent removal.
+        finish_decision(&mut in_flight, "req-1");
+        assert_eq!(in_flight, vec!["req-2"]);
+        assert!(begin_decision(&mut in_flight, "req-1"));
+    }
+
+    #[test]
+    fn is_current_detects_stale_generations() {
+        let epoch = 7u64;
+        assert!(is_current(epoch, epoch));
+        assert!(!is_current(epoch - 1, epoch));
+        assert!(!is_current(epoch + 1, epoch));
     }
 }
