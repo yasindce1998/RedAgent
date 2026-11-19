@@ -33,7 +33,7 @@ RedHands exposes capabilities. RedAgent decides **what to try next**, remembers 
 | 🖥️ **Native + web control room** | Dioxus desktop and WASM web UIs share components; an Axum REST/SSE API streams projections and routes approvals — no Node, no database server. |
 | ⚡ **Two planes, one protocol** | Go stays where it shines (the tool plane); Rust owns the control plane and the native UI. One protocol between them: MCP. |
 
-> **Status:** Phase 3 shipped. Engagements now carry content-addressed evidence blobs, a retest loop, SARIF/CycloneDX/MITRE exports, and a Dioxus WASM web console alongside the native UI.
+> **Status:** v0.4.0 — trust release. Scope enforcement, structured approval proposals, injection signals and tracing are live; the event ledger remains append-only and backward compatible.
 
 ## How it works
 
@@ -80,6 +80,22 @@ Gated RedHands tools return an inline `input_required` result. By default RedAge
 ```
 
 `--auto-approve` prints a loud warning and records `decided_by: auto-approve` in the ledger for every approval. Approval grants last exactly one tool call, matching RedHands' contract.
+
+### Scope and rules (v0.4.0)
+
+```sh
+redagent run "audit the lab" --llm --toolsets nmap,vuln --allow-read-only \
+  --scope-file scope.json --require-scope \
+  --redhands /path/to/redhands --ledger lab.db
+```
+
+`scope.json` declares `cidrs`, `domains`, `ports`, `target_paths`, and ordered
+`rules` with effects `allow`, `deny`, `require_approval`, or `auto_approve`. The
+guard extracts target-like arguments and **denies before the call leaves the
+process** if a target is out of scope or cannot be resolved. Approvals now show
+the exact arguments, scope verdict, risk flags and a diff from the previous call.
+Tool-output injections are recorded as ledger signals. See
+[THREAT_MODEL.md](THREAT_MODEL.md) for the boundary and residual risks.
 
 The engine spawns RedHands over stdio with a minimal toolset and redirects every state directory next to the ledger — your working directory stays clean, and the resulting `.db` is a portable, verifiable engagement record.
 

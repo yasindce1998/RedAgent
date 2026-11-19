@@ -5206,6 +5206,7 @@ dependencies = [
  "redagent-app",
  "redagent-core",
  "redagent-export",
+ "redagent-scope",
  "serde",
  "serde_json",
  "tempfile",
@@ -5240,6 +5241,9 @@ dependencies = [
  "redagent-app",
  "redagent-core",
  "redagent-export",
+ "redagent-scope",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 

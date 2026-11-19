@@ -45,6 +45,7 @@ pub struct PendingApproval {
     pub intent_id: String,
     pub tool: String,
     pub message: String,
+    pub proposal: Option<redagent_core::CallProposal>,
 }
 
 /// Body of `POST /api/engagements`.
@@ -66,6 +67,30 @@ pub struct RunRequest {
     pub toolsets: String,
     #[serde(default)]
     pub allow_read_only: bool,
+    #[serde(default)]
+    pub scope: Option<ScopeConfig>,
+    #[serde(default)]
+    pub target_paths: Vec<String>,
+    #[serde(default)]
+    pub require_declared_scope: bool,
+    #[serde(default = "default_true")]
+    pub injection_guard: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScopeConfig {
+    #[serde(default)]
+    pub cidrs: Vec<String>,
+    #[serde(default)]
+    pub domains: Vec<String>,
+    #[serde(default)]
+    pub ports: Vec<u16>,
+    #[serde(default)]
+    pub rules: Vec<redagent_scope::PolicyRule>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_toolsets() -> String {
@@ -183,7 +208,13 @@ pub(crate) struct ApiApprovalHandler {
 }
 
 impl ApprovalHandler for ApiApprovalHandler {
-    fn decide(&self, intent_id: &str, tool: &str, message: &str) -> anyhow::Result<(bool, String)> {
+    fn decide(
+        &self,
+        intent_id: &str,
+        tool: &str,
+        message: &str,
+        proposal: Option<&redagent_core::CallProposal>,
+    ) -> anyhow::Result<(bool, String)> {
         if self.auto_approve {
             return Ok((true, "auto-approve".to_string()));
         }
@@ -194,6 +225,7 @@ impl ApprovalHandler for ApiApprovalHandler {
             intent_id: intent_id.to_string(),
             tool: tool.to_string(),
             message: message.to_string(),
+            proposal: proposal.cloned(),
         };
 
         let (sender, receiver): (Sender<bool>, Receiver<bool>) = mpsc::channel();
@@ -482,7 +514,19 @@ async fn create_engagement(
     )
     .with_limits(request.max_tool_calls, request.max_intents)
     .with_retest(request.retest)
-    .with_toolsets(&request.toolsets);
+    .with_toolsets(&request.toolsets)
+    .with_required_scope(request.require_declared_scope)
+    .with_injection_guard(request.injection_guard)
+    .with_target_paths(request.target_paths.clone());
+    let config = match request.scope {
+        Some(scope) => config
+            .with_scope(
+                redagent_scope::Scope::new(scope.cidrs, scope.domains, scope.ports)
+                    .map_err(|e| ApiError::BadRequest(e.to_string()))?,
+            )
+            .with_rules(scope.rules),
+        None => config,
+    };
     let mut config = if request.allow_read_only {
         config.with_allowed_tools(Vec::<String>::new())
     } else {
@@ -706,7 +750,7 @@ mod tests {
 
         let worker = std::thread::spawn(move || {
             let decision = handler
-                .decide("intent-7", "redhands_scan", "approve this call?")
+                .decide("intent-7", "redhands_scan", "approve this call?", None)
                 .unwrap();
             tx.send(decision).unwrap();
         });
@@ -764,7 +808,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let worker = std::thread::spawn(move || {
             let decision = handler
-                .decide("intent-9", "redhands_exec", "dangerous call")
+                .decide("intent-9", "redhands_exec", "dangerous call", None)
                 .unwrap();
             tx.send(decision).unwrap();
         });
@@ -873,7 +917,9 @@ mod tests {
         };
         let (tx, rx) = mpsc::channel();
         let worker = std::thread::spawn(move || {
-            let decision = handler.decide("intent-timeout", "tool", "message").unwrap();
+            let decision = handler
+                .decide("intent-timeout", "tool", "message", None)
+                .unwrap();
             tx.send(decision).unwrap();
         });
 
@@ -917,6 +963,7 @@ mod tests {
             intent_id: "i".to_string(),
             tool: "t".to_string(),
             message: "m".to_string(),
+            proposal: None,
         };
         state.inner.pending.lock().unwrap().insert(
             "once".to_string(),
@@ -946,6 +993,7 @@ mod tests {
             intent_id: "i".to_string(),
             tool: "t".to_string(),
             message: "m".to_string(),
+            proposal: None,
         };
         state.inner.pending.lock().unwrap().insert(
             "dropped".to_string(),
@@ -984,6 +1032,7 @@ mod tests {
             intent_id: "i".to_string(),
             tool: "t".to_string(),
             message: "m".to_string(),
+            proposal: None,
         };
         state.inner.pending.lock().unwrap().insert(
             "poison".to_string(),
