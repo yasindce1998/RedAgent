@@ -19,3 +19,4 @@ rusqlite = { version = "0.43", features = ["bundled"] }
 clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
 tempfile = "3"
+tracing = "0.1"

@@ -6,6 +6,6 @@ pub mod events;
 pub mod ledger;
 pub mod projections;
 
-pub use events::{EventBody, StoredEvent};
+pub use events::{CallProposal, EventBody, StoredEvent};
 pub use ledger::Ledger;
 pub use projections::{render_markdown, EngagementView};
