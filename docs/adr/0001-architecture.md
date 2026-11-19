@@ -73,4 +73,19 @@ guard allowlist/budget, CLI (`run` / `report` / `verify`) and CI.
 - The UI ships as a separate binary (`redagent-ui`); the CLI gains `serve` to
   start the API. One Rust workspace, no frontend toolchain.
 
-Evidence blobs, retest loops and enterprise features remain later phases.
+## Phase 3 decisions
+
+- **Evidence blobs** are SHA-256 content-addressed files stored next to the
+  ledger; events reference hashes, never duplicate large output. The audit
+  trail stays compact and verifiable.
+- **Retest** is an opt-in engine flag that re-runs a tool after verification and
+  records a `still_reproducible` / `fixed` / `cannot_confirm` verdict as events.
+  It reuses the same guard and MCP path — no separate execution mechanism.
+- **Exports** (SARIF 2.1.0, CycloneDX 1.5, MITRE Navigator) are pure functions
+  of projections. They are available from both the CLI and the API, so the
+  engine never needs to know about report formats.
+- **Web console** reuses the same Dioxus components as the desktop UI via a
+  WASM binary; platform-specific sleeps are isolated behind a single helper.
+  The browser talks only to the Axum API — no direct ledger access.
+
+RBAC/KMS, OpenTelemetry and optional WASM plugins remain later phases.
