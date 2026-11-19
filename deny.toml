@@ -3,7 +3,6 @@ yanked = "warn"
 
 [licenses]
 unlicensed = "allow"
-unknown = "allow"
 allow = []
 deny = ["AGPL-3.0", "GPL-3.0", "GPL-2.0", "SSPL-1.0"]
 
