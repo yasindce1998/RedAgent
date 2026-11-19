@@ -46,6 +46,18 @@ enum Command {
         max_tool_calls: usize,
         #[arg(long, default_value_t = 6)]
         max_intents: usize,
+        /// Re-run each tool after verification to confirm the finding.
+        #[arg(long)]
+        retest: bool,
+    },
+    /// Export an engagement as SARIF, CycloneDX, MITRE Navigator or Markdown.
+    Export {
+        #[arg(long, default_value = "redagent.db")]
+        ledger: PathBuf,
+        #[arg(long, default_value = "markdown")]
+        format: String,
+        #[arg(long)]
+        output: Option<PathBuf>,
     },
     /// Render a ledger as a Markdown report.
     Report {
@@ -112,9 +124,11 @@ fn main() -> Result<()> {
             auto_approve,
             max_tool_calls,
             max_intents,
+            retest,
         } => {
             let mut config = Config::new(goal, redhands, ledger.clone())
-                .with_limits(max_tool_calls, max_intents);
+                .with_limits(max_tool_calls, max_intents)
+                .with_retest(retest);
             if llm {
                 config = config.with_llm(resolve_llm_config(
                     llm_base_url,
@@ -130,6 +144,22 @@ fn main() -> Result<()> {
             }
             run(&config)?;
             print!("{}", report_markdown(&ledger)?);
+        }
+        Command::Export {
+            ledger,
+            format,
+            output,
+        } => {
+            let view = redagent_app::load_view(&ledger)?;
+            let format: redagent_export::ExportFormat = format.parse()?;
+            let content = redagent_export::export(&view, format)?;
+            match output {
+                Some(path) => {
+                    std::fs::write(&path, content)?;
+                    println!("wrote {}", path.display());
+                }
+                None => print!("{content}"),
+            }
         }
         Command::Report { ledger } => print!("{}", report_markdown(&ledger)?),
         Command::Verify { ledger } => {
