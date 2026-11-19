@@ -103,7 +103,9 @@ pub fn project(events: &[StoredEvent]) -> EngagementView {
                 allowed,
                 reason,
             } => {
-                if let Some(intent) = view.intents.iter_mut().find(|i| &i.id == intent_id) {
+                // If an id was reused, the decision belongs to the most
+                // recently created intent with that id.
+                if let Some(intent) = view.intents.iter_mut().rev().find(|i| &i.id == intent_id) {
                     intent.allowed = Some(*allowed);
                     intent.reason = reason.clone();
                 }
@@ -152,9 +154,13 @@ pub fn project(events: &[StoredEvent]) -> EngagementView {
                 approved,
                 decided_by,
             } => {
+                // A decision refers to the latest request for this intent.
+                // Updating the first match would leave a newer request pending
+                // whenever an intent id is reused (e.g. a retry).
                 if let Some(approval) = view
                     .approvals
                     .iter_mut()
+                    .rev()
                     .find(|a| &a.intent_id == intent_id)
                 {
                     approval.approved = Some(*approved);
@@ -201,6 +207,9 @@ pub fn project(events: &[StoredEvent]) -> EngagementView {
             }
             EventBody::EngagementCompleted { .. } => view.completed = true,
             EventBody::EngagementAborted { reason } => view.abort_reason = Some(reason.clone()),
+            // Future event kinds are preserved in the ledger but have no
+            // meaning in this version's views; ignore them rather than panic.
+            EventBody::Unknown { .. } => {}
         }
     }
     view
@@ -557,5 +566,182 @@ mod tests {
         assert!(!md.contains("## Evidence"));
         assert!(!md.contains("## Retests"));
         assert!(!md.contains("Budget exhausted"));
+    }
+
+    #[test]
+    fn decision_updates_latest_request_for_reused_intent_id() {
+        let events = vec![
+            event(EventBody::ApprovalRequested {
+                intent_id: "i1".into(),
+                tool: "first".into(),
+                request_id: "req-1".into(),
+            }),
+            event(EventBody::ApprovalDecisionRecorded {
+                intent_id: "i1".into(),
+                approved: true,
+                decided_by: "first-op".into(),
+            }),
+            event(EventBody::ApprovalRequested {
+                intent_id: "i1".into(),
+                tool: "second".into(),
+                request_id: "req-2".into(),
+            }),
+            event(EventBody::ApprovalDecisionRecorded {
+                intent_id: "i1".into(),
+                approved: false,
+                decided_by: "second-op".into(),
+            }),
+        ];
+        let view = project(&events);
+        assert_eq!(view.approvals.len(), 2);
+        assert_eq!(view.approvals[0].approved, Some(true));
+        assert_eq!(view.approvals[0].decided_by, "first-op");
+        // The first (buggy) implementation re-wrote the first approval here,
+        // leaving the newest request pending.
+        assert_eq!(view.approvals[1].request_id, "req-2");
+        assert_eq!(view.approvals[1].approved, Some(false));
+        assert_eq!(view.approvals[1].decided_by, "second-op");
+
+        let intents = vec![
+            event(EventBody::IntentCreated {
+                id: "dup".into(),
+                title: "old".into(),
+                tool: "x".into(),
+                arguments: serde_json::json!({}),
+            }),
+            event(EventBody::IntentCreated {
+                id: "dup".into(),
+                title: "new".into(),
+                tool: "x".into(),
+                arguments: serde_json::json!({}),
+            }),
+            event(EventBody::GuardDecision {
+                intent_id: "dup".into(),
+                allowed: false,
+                reason: "denied".into(),
+            }),
+        ];
+        let view = project(&intents);
+        assert_eq!(view.intents[0].allowed, None);
+        assert_eq!(view.intents[1].title, "new");
+        assert_eq!(view.intents[1].allowed, Some(false));
+    }
+
+    #[test]
+    fn verification_and_retest_keep_ledger_order() {
+        let events = vec![
+            event(EventBody::FindingVerified {
+                finding_id: "f1".into(),
+                verdict: "confirmed".into(),
+                evidence_seq: 1,
+            }),
+            event(EventBody::FindingRetested {
+                finding_id: "f1".into(),
+                verdict: "fixed".into(),
+                evidence_seq: 2,
+            }),
+            event(EventBody::FindingVerified {
+                finding_id: "f2".into(),
+                verdict: "rejected".into(),
+                evidence_seq: 3,
+            }),
+            event(EventBody::FindingRetested {
+                finding_id: "f2".into(),
+                verdict: "still_reproducible".into(),
+                evidence_seq: 4,
+            }),
+        ];
+        let view = project(&events);
+        let verdicts: Vec<_> = view
+            .verifications
+            .iter()
+            .map(|v| (v.finding_id.as_str(), v.verdict.as_str()))
+            .chain(
+                view.retests
+                    .iter()
+                    .map(|v| (v.finding_id.as_str(), v.verdict.as_str())),
+            )
+            .collect();
+        assert_eq!(
+            verdicts,
+            [
+                ("f1", "confirmed"),
+                ("f2", "rejected"),
+                ("f1", "fixed"),
+                ("f2", "still_reproducible"),
+            ]
+        );
+        let md = render_markdown(&view);
+        let v_pos = md.find("confirmed").unwrap();
+        let r_pos = md.find("fixed").unwrap();
+        assert!(v_pos < r_pos, "markdown sections must be stable");
+    }
+
+    #[test]
+    fn unknown_events_do_not_change_projections_or_panic() {
+        let events = vec![
+            event(EventBody::EngagementStarted {
+                goal: "g".into(),
+                redhands_version: "v".into(),
+            }),
+            event(EventBody::Unknown {
+                event_kind: "future_kind".into(),
+                raw: r#"{"kind":"future_kind","x":1}"#.into(),
+            }),
+            event(EventBody::EngagementCompleted { findings: 0 }),
+        ];
+        let view = project(&events);
+        assert_eq!(view.goal.as_deref(), Some("g"));
+        assert!(view.completed);
+        assert!(view.intents.is_empty());
+        assert!(render_markdown(&view).contains("completed"));
+    }
+
+    #[test]
+    fn render_markdown_handles_empty_and_duplicate_ids() {
+        let events = vec![
+            event(EventBody::IntentCreated {
+                id: "".into(),
+                title: "".into(),
+                tool: "".into(),
+                arguments: serde_json::json!({}),
+            }),
+            event(EventBody::IntentCreated {
+                id: "dup".into(),
+                title: "dup".into(),
+                tool: "x".into(),
+                arguments: serde_json::json!({}),
+            }),
+            event(EventBody::IntentCreated {
+                id: "dup".into(),
+                title: "dup again".into(),
+                tool: "x".into(),
+                arguments: serde_json::json!({}),
+            }),
+            event(EventBody::FindingRecorded {
+                id: "".into(),
+                title: "".into(),
+                severity: "".into(),
+                evidence_seq: 0,
+            }),
+            event(EventBody::FindingRecorded {
+                id: "dup".into(),
+                title: "dup".into(),
+                severity: "info".into(),
+                evidence_seq: 1,
+            }),
+        ];
+        let md = render_markdown(&project(&events));
+        assert_eq!(md.matches("|  |  | not evaluated |").count(), 1);
+        assert!(md.contains("| dup | x | not evaluated |"));
+        assert!(md.contains("###  ()"));
+        assert!(md.contains("### dup (info)"));
+    }
+
+    #[test]
+    fn empty_projections_render_without_panicking() {
+        let md = render_markdown(&project(&[]));
+        assert!(md.contains("# RedAgent engagement report"));
+        assert!(md.contains("_none_"));
     }
 }
