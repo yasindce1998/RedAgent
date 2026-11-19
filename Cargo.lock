@@ -5242,6 +5242,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "redagent-conformance"
+version = "0.3.1"
+dependencies = [
+ "anyhow",
+ "redagent-contract",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "redagent-contract"
+version = "0.3.1"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "redagent-core"
 version = "0.3.1"
 dependencies = [

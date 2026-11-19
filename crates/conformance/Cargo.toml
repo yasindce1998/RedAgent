@@ -1,0 +1,16 @@
+[package]
+name = "redagent-conformance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+redagent-contract = { path = "../contract" }
+
+[[bin]]
+name = "fake-tool-server"
+path = "tests/support/fake_tool_server.rs"
