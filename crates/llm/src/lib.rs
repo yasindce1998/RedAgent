@@ -64,7 +64,21 @@ impl LlmClient {
     ///
     /// Returns the raw `choices[0].message.content` string. Non-2xx responses,
     /// empty choices/content and malformed JSON all produce descriptive errors.
+    ///
+    /// Every error is funneled through a final redaction pass so the API key
+    /// can never be echoed, even when a misconfigured base URL or a gateway
+    /// response happens to contain it.
     pub fn complete_json(&self, system: &str, user: &str) -> Result<String> {
+        self.complete_json_inner(system, user).map_err(|err| {
+            let rendered = format!("{err:#}");
+            if self.api_key.is_empty() || !rendered.contains(&self.api_key) {
+                return err;
+            }
+            anyhow!("{}", rendered.replace(&self.api_key, "[REDACTED]"))
+        })
+    }
+
+    fn complete_json_inner(&self, system: &str, user: &str) -> Result<String> {
         let endpoint = chat_completions_url(&self.base_url)?;
         let payload = ChatRequest {
             model: &self.model,
@@ -110,6 +124,7 @@ impl LlmClient {
             .into_iter()
             .next()
             .and_then(|choice| choice.message.content)
+            .and_then(ResponseContent::into_text)
             .ok_or_else(|| anyhow!("LLM response contained no message content"))?;
         if content.trim().is_empty() {
             return Err(anyhow!("LLM response message content was empty"));
@@ -149,7 +164,46 @@ struct Choice {
 
 #[derive(Deserialize)]
 struct ResponseMessage {
-    content: Option<String>,
+    content: Option<ResponseContent>,
+}
+
+/// `message.content` is normally a string, but some OpenAI-compatible
+/// endpoints return an array of content parts. Accept both shapes and stitch
+/// the text parts back together in order, ignoring non-text parts.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ResponseContent {
+    Text(String),
+    Parts(Vec<ContentPart>),
+}
+
+#[derive(Deserialize)]
+struct ContentPart {
+    #[serde(rename = "type", default)]
+    kind: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
+}
+
+impl ResponseContent {
+    fn into_text(self) -> Option<String> {
+        match self {
+            Self::Text(text) => Some(text),
+            Self::Parts(parts) => {
+                let text: String = parts
+                    .into_iter()
+                    // A missing `type` is treated as text; some gateways omit it.
+                    .filter(|part| part.kind.as_deref().unwrap_or("text") == "text")
+                    .filter_map(|part| part.text)
+                    .collect();
+                if text.is_empty() {
+                    None
+                } else {
+                    Some(text)
+                }
+            }
+        }
+    }
 }
 
 /// Resolve the chat completions endpoint, collapsing duplicate/trailing
@@ -307,6 +361,14 @@ mod tests {
                 "http://host.test/v1/chat/completions/",
                 "http://host.test/v1/chat/completions",
             ),
+            (
+                "http://host.test/v1?trace=abc",
+                "http://host.test/v1/chat/completions?trace=abc",
+            ),
+            (
+                "http://host.test/v1/chat/completions/?trace=abc#frag",
+                "http://host.test/v1/chat/completions?trace=abc",
+            ),
         ];
         for (base, expected) in cases {
             assert_eq!(chat_completions_url(base).unwrap(), expected, "{base}");
@@ -388,5 +450,96 @@ mod tests {
             let error = extract_json_object(input).unwrap_err().to_string();
             assert!(error.contains(kind), "{input}: {error}");
         }
+    }
+
+    /// The object scanner is byte-indexed over UTF-8 (punctuation bytes cannot
+    /// occur inside a multibyte sequence). A non-ASCII prefix must therefore
+    /// neither panic nor shift the slice: the correct object is returned.
+    #[test]
+    fn extraction_handles_fences_escapes_nesting_arrays_and_unicode_prefixes() {
+        let cases: &[(&str, &str, Value)] = &[
+            (
+                "fenced with language tag and prose",
+                "Plan:\n```json\n{\"tool\":\"scan\",\"n\":2}\n```\nDone.",
+                json!({"tool":"scan","n":2}),
+            ),
+            (
+                "fenced with prose on both sides",
+                "Before\n```JSON\n{\"a\":1}\n```\nAfter",
+                json!({"a":1}),
+            ),
+            (
+                "escaped braces and quotes inside strings",
+                r#"{"cmd":"echo {hi} and }","q":"say \" } ok"}"#,
+                json!({"cmd":"echo {hi} and }","q":"say \" } ok"}),
+            ),
+            (
+                "nested objects and arrays",
+                r#"{"a":{"b":[1,2,{"c":3}]}}"#,
+                json!({"a":{"b":[1,2,{"c":3}]}}),
+            ),
+            (
+                "single object inside an array in prose",
+                "Result: [{\"a\":1}] done",
+                json!({"a":1}),
+            ),
+            (
+                "non-ASCII two-byte prefix",
+                "Résumé: {\"a\":1}",
+                json!({"a":1}),
+            ),
+            (
+                "non-ASCII three-byte prefix",
+                "结果：{\"a\":1}",
+                json!({"a":1}),
+            ),
+            ("non-ASCII four-byte prefix", "🎉 {\"a\":1}", json!({"a":1})),
+            (
+                "non-ASCII inside a string containing braces",
+                "{\"cmd\":\"echo {héllo} }\"}",
+                json!({"cmd":"echo {héllo} }"}),
+            ),
+            (
+                "non-ASCII escaped via \\uXXXX",
+                r#"{"name":"caf\u00e9","b":2}"#,
+                json!({"name":"café","b":2}),
+            ),
+        ];
+        for (name, input, expected) in cases {
+            assert_eq!(&extract_json_object(input).unwrap(), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn extraction_rejects_ambiguous_and_non_object_shapes() {
+        let cases: &[(&str, &str)] = &[
+            ("two objects in prose", "{\"a\":1} and {\"b\":2}"),
+            (
+                "two objects in fenced blocks",
+                "```json\n{\"a\":1}\n```\n```json\n{\"b\":2}\n```",
+            ),
+            ("pure array of objects", "[{\"a\":1},{\"b\":2}]"),
+            ("no object", "just prose"),
+        ];
+        for (name, input) in cases {
+            assert!(extract_json_object(input).is_err(), "{name}");
+        }
+    }
+
+    #[test]
+    fn redaction_handles_repeated_keys_and_unicode_without_panicking() {
+        let key = "sk-secret";
+        let body = format!("préfix {key} and {key} and 中文 suffix");
+        let cleaned = redact_and_truncate(&body, key);
+        assert!(!cleaned.contains(key), "{cleaned}");
+        assert_eq!(cleaned.matches("[REDACTED]").count(), 2);
+        assert!(cleaned.contains("中文"));
+
+        // Truncation happens after redaction and at a char boundary.
+        let long = format!("{key} {}", "é".repeat(1000));
+        let cleaned = redact_and_truncate(&long, key);
+        assert!(!cleaned.contains(key), "{cleaned}");
+        assert!(cleaned.ends_with("... [truncated]"));
+        assert!(cleaned.chars().count() <= MAX_ERROR_BODY_CHARS + 15);
     }
 }

@@ -169,6 +169,110 @@ fn http_errors_do_not_leak_the_api_key() {
     handle.join().unwrap();
 }
 
+/// A server that accepts the connection but never replies, to exercise the
+/// client-side timeout path.
+fn spawn_silent_server() -> (String, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let handle = thread::spawn(move || {
+        let (_stream, _) = listener.accept().unwrap();
+        thread::sleep(Duration::from_secs(2));
+    });
+    (base_url, handle)
+}
+
+#[test]
+fn malformed_json_body_echoing_the_key_does_not_leak_it() {
+    // A 200 response whose body is malformed JSON and contains the key.
+    for body in [
+        r#"{"choices":[{"message":{"content":"ok"}}],"echo":test-key}"#,
+        "test-key is not json",
+        r#"{"choices":[{"message":{"content":test-key}}]}"#,
+    ] {
+        let (base_url, handle) = spawn_server(move |_| response("200 OK", body));
+        let client = LlmClient::new(&base_url, "test-key", "test-model");
+        let error = client.complete_json("s", "u").unwrap_err().to_string();
+        assert!(!error.contains("test-key"), "{body} -> {error}");
+        handle.join().unwrap();
+    }
+}
+
+#[test]
+fn timeout_errors_do_not_leak_the_api_key() {
+    let (base_url, _handle) = spawn_silent_server();
+    let client = LlmClient::new(&base_url, "test-key", "test-model")
+        .with_timeout(Duration::from_millis(100));
+    let error = client.complete_json("s", "u").unwrap_err().to_string();
+    assert!(!error.contains("test-key"), "{error}");
+}
+
+#[test]
+fn invalid_base_url_echoing_the_key_does_not_leak_it() {
+    let client = LlmClient::new("http://test-key.invalid", "test-key", "test-model");
+    // A syntactically invalid URL that also embeds the key must not echo it.
+    let client2 = LlmClient::new("::: test-key :::", "test-key", "test-model");
+    for client in [client, client2] {
+        let error = client.complete_json("s", "u").unwrap_err().to_string();
+        assert!(!error.contains("test-key"), "{error}");
+    }
+}
+
+#[test]
+fn content_as_array_of_text_parts_is_accepted() {
+    let body = json!({
+        "choices": [{
+            "message": {
+                "content": [
+                    {"type": "text", "text": "{\"tool\":\""},
+                    {"type": "text", "text": "health\"}"},
+                    {"type": "image_url", "image_url": {"url": "http://example/x.png"}}
+                ]
+            }
+        }]
+    })
+    .to_string();
+    let (base_url, handle) = spawn_server(move |_| response("200 OK", &body));
+    let client = LlmClient::new(&base_url, "test-key", "test-model");
+    assert_eq!(
+        client.complete_json("s", "u").unwrap(),
+        "{\"tool\":\"health\"}"
+    );
+    handle.join().unwrap();
+}
+
+#[test]
+fn content_array_parts_without_type_are_treated_as_text() {
+    let body = r#"{"choices":[{"message":{"content":[{"text":"{\"a\":"},{"text":"1}"}]}}]}"#;
+    let (base_url, handle) = spawn_server(move |_| response("200 OK", body));
+    let client = LlmClient::new(&base_url, "test-key", "test-model");
+    assert_eq!(client.complete_json("s", "u").unwrap(), "{\"a\":1}");
+    handle.join().unwrap();
+}
+
+#[test]
+fn large_content_is_returned_intact() {
+    let content = "x".repeat(100_000);
+    let body = json!({"choices":[{"message":{"content":content}}]}).to_string();
+    let (base_url, handle) = spawn_server(move |_| response("200 OK", &body));
+    let client = LlmClient::new(&base_url, "test-key", "test-model");
+    assert_eq!(client.complete_json("s", "u").unwrap().len(), 100_000);
+    handle.join().unwrap();
+}
+
+#[test]
+fn content_array_without_text_is_an_error() {
+    let body =
+        r#"{"choices":[{"message":{"content":[{"type":"image_url","image_url":{"url":"x"}}]}}]}"#;
+    let (base_url, handle) = spawn_server(move |_| response("200 OK", body));
+    let client = LlmClient::new(&base_url, "test-key", "test-model");
+    let error = client.complete_json("s", "u").unwrap_err().to_string();
+    assert!(
+        error.contains("no message content") || error.contains("empty"),
+        "{error}"
+    );
+    handle.join().unwrap();
+}
+
 #[test]
 fn malformed_responses_are_errors() {
     let cases = [

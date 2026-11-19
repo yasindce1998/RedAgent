@@ -97,22 +97,17 @@ fn sarif_level(severity: &str) -> &'static str {
     }
 }
 
-/// Derive a deterministic `urn:uuid:...` from the goal and findings using
+/// Derive a deterministic `urn:uuid:...` from the engagement contents using
 /// SHA-256 (first 32 hex digits, arranged in the UUID 8-4-4-4-12 layout).
+///
+/// The seed is the canonical JSON serialization of the *whole* view. Struct
+/// field order is fixed and there are no unordered maps, so the seed is
+/// deterministic; JSON escaping makes the field boundaries unambiguous. This
+/// also disambiguates engagements that share a goal and findings but differ
+/// elsewhere (verification/retest verdicts, tool output, version, ...), which
+/// a seed built from only a few hand-picked fields would collide on.
 fn serial_number(view: &EngagementView) -> String {
-    let mut seed = String::new();
-    seed.push_str(view.goal.as_deref().unwrap_or(""));
-    seed.push('\u{1f}');
-    for finding in &view.findings {
-        seed.push_str(&finding.id);
-        seed.push('\u{1e}');
-        seed.push_str(&finding.title);
-        seed.push('\u{1e}');
-        seed.push_str(&finding.severity);
-        seed.push('\u{1e}');
-        seed.push_str(&finding.evidence_seq.to_string());
-        seed.push('\u{1f}');
-    }
+    let seed = serde_json::to_string(view).unwrap_or_default();
 
     let digest = sha2::Sha256::digest(seed.as_bytes());
     let hex = hex::encode(digest);
@@ -127,16 +122,29 @@ fn serial_number(view: &EngagementView) -> String {
     )
 }
 
+/// A byte is a "word" byte for MITRE id boundary checks (ASCII `\b`
+/// semantics: letters, digits and underscore). Non-ASCII UTF-8 bytes are not
+/// word bytes, which is consistent with treating non-ASCII text as a boundary.
+fn is_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
 /// Find MITRE ATT&CK technique IDs (`T` followed by four digits) in `text`.
-/// Lowercase `t` is accepted and normalized to uppercase. Results keep the
-/// order in which they appear.
+/// Lowercase `t` is accepted and normalized to uppercase. The id must sit on
+/// word boundaries on both sides so tokens such as `XT1059`, `T10599` and
+/// `AT1059x` are not false positives, while `T1059`, `(T1059)`, `T1059.003`
+/// and `CWE-T1059` are recognized. Results keep the order in which they appear.
 fn scan_technique_ids(text: &str) -> Vec<String> {
     let bytes = text.as_bytes();
     let mut found = Vec::new();
     let mut i = 0;
     while i + 4 < bytes.len() {
         let is_t = bytes[i] == b'T' || bytes[i] == b't';
+        let left_boundary = i == 0 || !is_word_byte(bytes[i - 1]);
+        let right_boundary = i + 5 >= bytes.len() || !is_word_byte(bytes[i + 5]);
         if is_t
+            && left_boundary
+            && right_boundary
             && bytes[i + 1].is_ascii_digit()
             && bytes[i + 2].is_ascii_digit()
             && bytes[i + 3].is_ascii_digit()
@@ -217,16 +225,23 @@ fn to_sarif(view: &EngagementView) -> Value {
     let redhands_version = view.redhands_version.clone().unwrap_or_default();
     let properties = json!({ "goal": goal, "redhands_version": redhands_version });
 
+    // Several findings can sanitize to the same rule id. SARIF requires rule
+    // ids to be unique within a run, so emit each rule once while keeping one
+    // result per finding (results may reference the same rule).
+    let mut seen_rule_ids = std::collections::HashSet::new();
     let rules: Vec<Value> = view
         .findings
         .iter()
-        .map(|finding| {
+        .filter_map(|finding| {
             let id = sanitize_rule_id(&finding.title);
-            json!({
+            if !seen_rule_ids.insert(id.clone()) {
+                return None;
+            }
+            Some(json!({
                 "id": id.clone(),
                 "name": id,
                 "shortDescription": { "text": finding.title },
-            })
+            }))
         })
         .collect();
 
@@ -344,7 +359,7 @@ fn to_mitre(view: &EngagementView) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use redagent_core::projections::{FindingView, ToolCallView};
+    use redagent_core::projections::{FindingView, RetestView, ToolCallView, VerificationView};
     use std::str::FromStr;
 
     fn sample_view() -> EngagementView {
@@ -654,11 +669,153 @@ mod tests {
     }
 
     #[test]
-    fn scanner_normalizes_lowercase_and_ignores_short_ids() {
+    fn scanner_normalizes_lowercase_and_ignores_wrong_length_ids() {
         assert_eq!(
             scan_technique_ids("t1059 and T1234 and T12 and T12345"),
-            vec!["T1059", "T1234", "T1234"]
+            vec!["T1059", "T1234"]
         );
         assert!(scan_technique_ids("no techniques here").is_empty());
+    }
+
+    /// A technique id must sit on ASCII word boundaries: a preceding or
+    /// following letter/digit/underscore means it is part of a larger token
+    /// (e.g. `XT1059`, `T10599`, `AT1059x`) and must not be reported.
+    #[test]
+    fn scanner_requires_word_boundaries() {
+        let cases: &[(&str, &[&str])] = &[
+            ("T1059", &["T1059"]),
+            ("(T1059)", &["T1059"]),
+            ("T1059.003", &["T1059"]),
+            ("CWE-T1059", &["T1059"]),
+            ("t1059", &["T1059"]),
+            ("XT1059", &[]),
+            ("T10599", &[]),
+            ("AT1059x", &[]),
+            ("_T1059", &[]),
+            ("T1059_x", &[]),
+            ("1T1059", &[]),
+            ("T10591", &[]),
+            ("see XT1059, then T1059 and AT1059x", &["T1059"]),
+        ];
+        for (text, expected) in cases {
+            let got = scan_technique_ids(text);
+            let got: Vec<&str> = got.iter().map(String::as_str).collect();
+            assert_eq!(got, *expected, "input: {text}");
+        }
+    }
+
+    #[test]
+    fn sarif_deduplicates_rules_but_keeps_all_results() {
+        let view = EngagementView {
+            findings: vec![
+                FindingView {
+                    id: "f-1".to_string(),
+                    title: "Access denied!".to_string(),
+                    severity: "high".to_string(),
+                    evidence_seq: 1,
+                },
+                FindingView {
+                    id: "f-2".to_string(),
+                    title: "Access denied?".to_string(),
+                    severity: "low".to_string(),
+                    evidence_seq: 2,
+                },
+            ],
+            ..Default::default()
+        };
+
+        let doc: Value =
+            serde_json::from_str(&export(&view, ExportFormat::Sarif).unwrap()).unwrap();
+        let run = &doc["runs"][0];
+
+        // Both titles sanitize to `access-denied`; the rule table must contain
+        // a single entry while both results remain.
+        let rules = run["tool"]["driver"]["rules"].as_array().unwrap();
+        assert_eq!(rules.len(), 1, "duplicate rule ids in {rules:?}");
+        assert_eq!(rules[0]["id"], "access-denied");
+
+        let results = run["results"].as_array().unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0]["ruleId"], "access-denied");
+        assert_eq!(results[1]["ruleId"], "access-denied");
+        assert_eq!(results[0]["message"]["text"], "Access denied!");
+        assert_eq!(results[1]["message"]["text"], "Access denied?");
+    }
+
+    #[test]
+    fn cyclonedx_serial_disambiguates_otherwise_identical_engagements() {
+        let base = || EngagementView {
+            goal: Some("Same goal".to_string()),
+            findings: vec![FindingView {
+                id: "f-1".to_string(),
+                title: "Finding".to_string(),
+                severity: "high".to_string(),
+                evidence_seq: 3,
+            }],
+            ..Default::default()
+        };
+
+        let serial = |view: &EngagementView| {
+            let doc: Value =
+                serde_json::from_str(&export(view, ExportFormat::CycloneDx).unwrap()).unwrap();
+            doc["serialNumber"].as_str().unwrap().to_string()
+        };
+
+        let plain = base();
+        let mut verified = base();
+        verified.verifications.push(VerificationView {
+            finding_id: "f-1".to_string(),
+            verdict: "confirmed".to_string(),
+            evidence_seq: 4,
+        });
+        let mut retested = base();
+        retested.retests.push(RetestView {
+            finding_id: "f-1".to_string(),
+            verdict: "fixed".to_string(),
+            evidence_seq: 5,
+        });
+        let mut versioned = base();
+        versioned.redhands_version = Some("v9.9".to_string());
+
+        let plain_serial = serial(&plain);
+        assert_ne!(plain_serial, serial(&verified));
+        assert_ne!(plain_serial, serial(&retested));
+        assert_ne!(plain_serial, serial(&versioned));
+    }
+
+    #[test]
+    fn exports_handle_empty_findings_and_invalid_severities() {
+        let empty = EngagementView::default();
+        for format in [
+            ExportFormat::Sarif,
+            ExportFormat::CycloneDx,
+            ExportFormat::MitreNavigator,
+        ] {
+            let doc: Value = serde_json::from_str(&export(&empty, format).unwrap()).unwrap();
+            assert!(doc.is_object(), "{format:?}");
+        }
+        let sarif: Value =
+            serde_json::from_str(&export(&empty, ExportFormat::Sarif).unwrap()).unwrap();
+        assert_eq!(sarif["runs"][0]["results"].as_array().unwrap().len(), 0);
+        assert_eq!(
+            sarif["runs"][0]["tool"]["driver"]["rules"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+
+        let view = EngagementView {
+            findings: vec![FindingView {
+                id: "f-1".to_string(),
+                title: "Odd severity".to_string(),
+                severity: "not-a-severity".to_string(),
+                evidence_seq: 1,
+            }],
+            ..Default::default()
+        };
+        let sarif: Value =
+            serde_json::from_str(&export(&view, ExportFormat::Sarif).unwrap()).unwrap();
+        assert_eq!(sarif["runs"][0]["results"][0]["level"], "note");
     }
 }
