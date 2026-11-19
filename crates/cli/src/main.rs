@@ -49,6 +49,14 @@ enum Command {
         /// Re-run each tool after verification to confirm the finding.
         #[arg(long)]
         retest: bool,
+        /// Comma-separated RedHands toolsets to expose (e.g. nmap,vuln).
+        /// Tool ids, not profiles: "all" is not a valid value.
+        #[arg(long, default_value = "health")]
+        toolsets: String,
+        /// Auto-admit read-only, non-gated tools from the live catalog.
+        /// Without this, only the explicitly allowlisted tools may run.
+        #[arg(long)]
+        allow_read_only: bool,
     },
     /// Export an engagement as SARIF, CycloneDX, MITRE Navigator or Markdown.
     Export {
@@ -125,10 +133,16 @@ fn main() -> Result<()> {
             max_tool_calls,
             max_intents,
             retest,
+            toolsets,
+            allow_read_only,
         } => {
             let mut config = Config::new(goal, redhands, ledger.clone())
                 .with_limits(max_tool_calls, max_intents)
-                .with_retest(retest);
+                .with_retest(retest)
+                .with_toolsets(toolsets);
+            if allow_read_only {
+                config = config.with_allowed_tools(Vec::<String>::new());
+            }
             if llm {
                 config = config.with_llm(resolve_llm_config(
                     llm_base_url,

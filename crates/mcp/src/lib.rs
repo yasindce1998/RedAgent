@@ -6,4 +6,4 @@
 pub mod client;
 pub mod jsonrpc;
 
-pub use client::{StdioMcpClient, ToolCallResult, ToolInfo};
+pub use client::{ServerDisconnected, StdioMcpClient, ToolCallResult, ToolInfo};

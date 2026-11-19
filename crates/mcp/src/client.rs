@@ -1,11 +1,12 @@
-use std::io::{BufRead, BufReader, Write};
+use std::fmt;
+use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
 
 use crate::jsonrpc::{parse_response, Notification, Request, JSONRPC_VERSION};
@@ -15,14 +16,89 @@ use crate::jsonrpc::{parse_response, Notification, Request, JSONRPC_VERSION};
 pub const PROTOCOL_VERSIONS: [&str; 3] = ["2026-07-28", "2025-03-26", "2024-11-05"];
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// RedHands' `x-redhands-policy` extension on a `tools/list` entry. Only the
+/// fields the engine enforces are modelled; the rest are ignored.
+#[derive(Debug, Clone, Default, Deserialize)]
+struct RedHandsPolicy {
+    #[serde(default, alias = "readOnly")]
+    read_only: bool,
+    #[serde(default, alias = "requiresApproval")]
+    requires_approval: bool,
+}
+
+/// MCP-standard tool annotations (RFC-style `readOnlyHint`, `destructiveHint`,
+/// ...). Used together with the RedHands policy so a server that omits one of
+/// the two shapes can still describe a tool's safety.
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ToolAnnotations {
+    #[serde(default, alias = "readOnlyHint")]
+    read_only_hint: bool,
+}
+
 #[derive(Debug, Clone, Deserialize)]
+struct RawToolInfo {
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default, alias = "inputSchema")]
+    input_schema: Value,
+    #[serde(default, rename = "x-redhands-policy")]
+    policy: Option<RedHandsPolicy>,
+    #[serde(default)]
+    annotations: Option<ToolAnnotations>,
+}
+
+/// A tool as advertised by RedHands' `tools/list`, with the safety metadata
+/// the engine needs for its allowlist decision flattened into two booleans.
+#[derive(Debug, Clone, PartialEq)]
 pub struct ToolInfo {
     pub name: String,
-    #[serde(default)]
     pub description: String,
-    #[serde(default, alias = "inputSchema")]
     pub input_schema: Value,
+    /// True only when every available signal (RedHands policy and MCP
+    /// annotations) says the tool is read-only. Missing signals fail closed.
+    pub read_only: bool,
+    /// True when RedHands marks the tool as requiring operator approval.
+    pub requires_approval: bool,
 }
+
+impl<'de> Deserialize<'de> for ToolInfo {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let raw = RawToolInfo::deserialize(deserializer)?;
+        let mut signals = Vec::new();
+        if let Some(policy) = &raw.policy {
+            signals.push(policy.read_only);
+        }
+        if let Some(annotations) = &raw.annotations {
+            signals.push(annotations.read_only_hint);
+        }
+        Ok(Self {
+            name: raw.name,
+            description: raw.description,
+            input_schema: raw.input_schema,
+            read_only: !signals.is_empty() && signals.iter().all(|value| *value),
+            requires_approval: raw
+                .policy
+                .as_ref()
+                .map(|policy| policy.requires_approval)
+                .unwrap_or(false),
+        })
+    }
+}
+
+/// Returned by [`StdioMcpClient::request`] when the child process closed its
+/// stdout pipe before answering. Distinct from a timeout so callers can stop
+/// retrying instead of waiting for a response that can never arrive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServerDisconnected;
+
+impl fmt::Display for ServerDisconnected {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("MCP server exited")
+    }
+}
+
+impl std::error::Error for ServerDisconnected {}
 
 #[derive(Debug, Clone)]
 pub struct ToolCallResult {
@@ -109,7 +185,15 @@ impl StdioMcpClient {
                     self.notify("notifications/initialized", json!({}))?;
                     return Ok(negotiated);
                 }
-                Err(error) => last_error = Some(error),
+                Err(error) => {
+                    // A closed pipe means the server is gone; trying the other
+                    // protocol versions cannot succeed and only masks the real
+                    // failure behind "timeout waiting for response".
+                    if error.downcast_ref::<ServerDisconnected>().is_some() {
+                        return Err(error).context("MCP server exited during initialize");
+                    }
+                    last_error = Some(error);
+                }
             }
         }
         Err(last_error.unwrap_or_else(|| anyhow!("all protocol versions failed")))
@@ -194,10 +278,16 @@ impl StdioMcpClient {
         self.write_line(&serde_json::to_string(&request)?)?;
 
         loop {
-            let line = self
-                .reader
-                .recv_timeout(self.timeout)
-                .with_context(|| format!("timeout waiting for response to {method}"))?;
+            let line = match self.reader.recv_timeout(self.timeout) {
+                Ok(line) => line,
+                Err(RecvTimeoutError::Timeout) => {
+                    return Err(anyhow!("timeout waiting for response to {method}"))
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(anyhow::Error::new(ServerDisconnected)
+                        .context(format!("MCP server exited while waiting for {method}")))
+                }
+            };
             // Servers may emit logs or notifications on stdout; ignore them.
             let response = match parse_response(&line) {
                 Ok(response) => response,
@@ -218,9 +308,18 @@ impl StdioMcpClient {
     }
 
     fn write_line(&mut self, line: &str) -> Result<()> {
-        self.writer.write_all(line.as_bytes())?;
-        self.writer.write_all(b"\n")?;
-        self.writer.flush()?;
+        let write = (|| -> std::io::Result<()> {
+            self.writer.write_all(line.as_bytes())?;
+            self.writer.write_all(b"\n")?;
+            self.writer.flush()
+        })();
+        if let Err(error) = write {
+            if error.kind() == ErrorKind::BrokenPipe || error.kind() == ErrorKind::NotFound {
+                return Err(anyhow::Error::new(ServerDisconnected)
+                    .context("MCP server exited while writing a request"));
+            }
+            return Err(error).context("writing MCP request");
+        }
         Ok(())
     }
 }
