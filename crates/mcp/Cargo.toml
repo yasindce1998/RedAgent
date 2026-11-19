@@ -10,6 +10,9 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [[bin]]
 name = "fake-mcp-server"
 path = "tests/support/fake_server.rs"
