@@ -5278,6 +5278,10 @@ dependencies = [
 [[package]]
 name = "redagent-guard"
 version = "0.3.1"
+dependencies = [
+ "redagent-scope",
+ "serde_json",
+]
 
 [[package]]
 name = "redagent-llm"
@@ -5297,6 +5301,17 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "redagent-scope"
+version = "0.3.1"
+dependencies = [
+ "anyhow",
+ "ipnet",
+ "serde",
+ "serde_json",
+ "url",
 ]
 
 [[package]]

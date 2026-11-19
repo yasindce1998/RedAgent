@@ -6,3 +6,5 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+serde_json.workspace = true
+redagent-scope = { path = "../scope" }
