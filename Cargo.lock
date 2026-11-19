@@ -4860,6 +4860,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "redagent-export"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "redagent-core",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "redagent-guard"
 version = "0.2.0"
 
