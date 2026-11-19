@@ -416,6 +416,37 @@ fn fresh_nonce() -> String {
     format!("{now:x}-{sequence:x}")
 }
 
+/// A previously rejected planning attempt, recorded by the engine's backtracking
+/// loop so the next planner invocation can avoid repeating it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlanFailure {
+    pub reason: String,
+    pub attempt: u32,
+}
+
+/// Upper bound on the number of failed attempts shown to the planner. Keeping
+/// this list short avoids bloating the prompt with a long history of noise.
+const MAX_FORMATTED_FAILURES: usize = 8;
+
+/// Render rejected planning attempts as a compact, planner-facing bullet list.
+///
+/// An explicit header frames the entries as known failures rather than
+/// instructions. Returns an empty string when there is nothing to report.
+/// At most eight entries are rendered, in the order supplied by the caller.
+pub fn format_failures(failures: &[PlanFailure]) -> String {
+    if failures.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("Known failed approaches (do not repeat verbatim):\n");
+    for failure in failures.iter().take(MAX_FORMATTED_FAILURES) {
+        out.push_str(&format!(
+            "- attempt {}: {}\n",
+            failure.attempt, failure.reason
+        ));
+    }
+    out
+}
+
 pub trait Planner {
     fn plan(&self, goal: &str, available_tools: &[ToolDescriptor]) -> Result<Vec<Intent>>;
 }
@@ -746,6 +777,45 @@ mod tests {
                 .cloned()
                 .ok_or_else(|| anyhow!("no more stub replies"))
         }
+    }
+
+    #[test]
+    fn format_failures_renders_header_and_bullets() {
+        let failures = vec![
+            PlanFailure {
+                reason: "used unknown tool 'foo'".to_string(),
+                attempt: 1,
+            },
+            PlanFailure {
+                reason: "duplicate call".to_string(),
+                attempt: 2,
+            },
+        ];
+        let rendered = format_failures(&failures);
+        assert!(rendered.starts_with("Known failed approaches (do not repeat verbatim):"));
+        assert!(rendered.contains("- attempt 1: used unknown tool 'foo'"));
+        assert!(rendered.contains("- attempt 2: duplicate call"));
+    }
+
+    #[test]
+    fn format_failures_caps_at_eight_and_handles_empty() {
+        assert_eq!(format_failures(&[]), "");
+        let failures: Vec<PlanFailure> = (1..=10)
+            .map(|attempt| PlanFailure {
+                reason: format!("reason {attempt}"),
+                attempt,
+            })
+            .collect();
+        let rendered = format_failures(&failures);
+        assert_eq!(
+            rendered
+                .lines()
+                .filter(|line| line.starts_with("- attempt "))
+                .count(),
+            8
+        );
+        assert!(rendered.contains("- attempt 8: reason 8"));
+        assert!(!rendered.contains("- attempt 9"));
     }
 
     #[test]
