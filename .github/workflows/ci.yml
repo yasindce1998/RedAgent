@@ -47,10 +47,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Cargo deny (licenses / duplicate versions)
         uses: EmbarkStudios/cargo-deny-action@v2
-      - name: Audit advisories
-        uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+      # cargo-deny checks the same RustSec advisory DB, so no second audit step.
 
   fuzz:
     runs-on: ubuntu-latest

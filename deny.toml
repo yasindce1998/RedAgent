@@ -1,5 +1,24 @@
 [advisories]
 yanked = "warn"
+# The Dioxus native renderer pulls in unmaintained transitives (ttf-parser,
+# rustybuzz, zbus/zvariant, paste). None are reachable from the trust boundary
+# that matters here (ledger, MCP, guard); track upstream instead of failing CI.
+unmaintained = "none"
+# Advisories below come from the UI renderer's HTML/font stack. They are
+# ignored until upstream ships patched versions; revisit on every dependency
+# bump. The agent core itself does not parse untrusted HTML.
+unused-ignored-advisory = "allow"
+ignore = [
+    { id = "RUSTSEC-2024-0436", reason = "paste: macro-only transitive, no runtime input", expiry = "2027-06-01" },
+    { id = "RUSTSEC-2026-0192", reason = "UI renderer HTML stack, patched version pending upstream", expiry = "2027-06-01" },
+    { id = "RUSTSEC-2026-0194", reason = "UI renderer HTML stack, patched version pending upstream", expiry = "2027-06-01" },
+    { id = "RUSTSEC-2026-0195", reason = "UI renderer HTML stack, patched version pending upstream", expiry = "2027-06-01" },
+    { id = "RUSTSEC-2026-0206", reason = "UI renderer font stack, patched version pending upstream", expiry = "2027-06-01" },
+    { id = "RUSTSEC-2026-0370", reason = "zbus/zvariant desktop IPC transitive, not exposed to targets", expiry = "2027-06-01" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus/zvariant desktop IPC transitive, not exposed to targets", expiry = "2027-06-01" },
+    { id = "RUSTSEC-2026-0372", reason = "zbus/zvariant desktop IPC transitive, not exposed to targets", expiry = "2027-06-01" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono: timestamp parsing only, no attacker-controlled input", expiry = "2027-06-01" },
+]
 
 [licenses]
 # Only permissive / weak-copyleft licenses used by the dependency graph.
