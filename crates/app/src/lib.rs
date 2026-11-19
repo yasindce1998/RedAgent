@@ -41,6 +41,12 @@ pub struct Config {
     pub redhands_version: String,
     pub max_tool_calls: usize,
     pub max_intents: usize,
+    /// Comma-separated RedHands toolsets exposed to the planner. Defaults to
+    /// `"health"` so deterministic flows are unchanged; `"nmap,vuln,..."`
+    /// unlocks the live tool catalog for LLM chaining.
+    pub toolsets: String,
+    /// Explicit allowlist. An EMPTY vector means "allow every read-only tool
+    /// in the live catalog"; any non-empty vector overrides that default.
     pub allowed_tools: Vec<String>,
     pub planner_mode: PlannerMode,
     pub llm: Option<LlmConfig>,
@@ -58,12 +64,20 @@ impl Config {
             redhands_version: DEFAULT_REDHANDS_VERSION.to_string(),
             max_tool_calls: 8,
             max_intents: 6,
+            toolsets: "health".to_string(),
             allowed_tools: vec!["redhands_health".to_string()],
             planner_mode: PlannerMode::Deterministic,
             llm: None,
             approval_mode: ApprovalMode::Deny,
             retest: false,
         }
+    }
+
+    /// Select the RedHands toolsets the MCP server advertises to the planner.
+    /// Pass a comma-separated string such as `"nmap,vuln"`.
+    pub fn with_toolsets(mut self, toolsets: impl Into<String>) -> Self {
+        self.toolsets = toolsets.into();
+        self
     }
 
     /// Enable or disable the post-finding retest loop (default: disabled).
@@ -89,6 +103,9 @@ impl Config {
         self
     }
 
+    /// Set the guard allowlist. An empty iterator opts into "auto-allow all
+    /// read-only tools advertised by the live RedHands catalog"; a non-empty
+    /// list is authoritative and denies everything else.
     pub fn with_allowed_tools(
         mut self,
         tools: impl IntoIterator<Item = impl Into<String>>,
@@ -131,6 +148,8 @@ impl ToolExecutor for McpExecutor {
                 name: tool.name,
                 description: tool.description,
                 input_schema: tool.input_schema,
+                read_only: tool.read_only,
+                requires_approval: tool.requires_approval,
             })
             .collect())
     }
@@ -196,19 +215,20 @@ impl Verifier for HeuristicVerifier {
     }
 }
 
-/// Spawn the pinned Go tool plane over stdio. All state files are placed next
-/// to the ledger so a developer's working directory is never polluted.
-pub fn spawn_executor(config: &Config) -> Result<McpExecutor> {
+/// Build the environment passed to the RedHands MCP child process. Kept as a
+/// separate function so the toolset wiring can be asserted without spawning a
+/// real binary.
+fn executor_env(config: &Config) -> Vec<(&'static str, String)> {
     let ledger_dir = config
         .ledger_path
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     let path = |name: &str| ledger_dir.join(name).to_string_lossy().into_owned();
-    let env: Vec<(&str, String)> = vec![
+    vec![
         ("REDHANDS_TRANSPORT", "stdio".to_string()),
         ("REDHANDS_AUTH", "none".to_string()),
-        ("REDHANDS_TOOLSETS", "health".to_string()),
+        ("REDHANDS_TOOLSETS", config.toolsets.clone()),
         ("REDHANDS_AUDIT_FILE", path("redhands-audit.jsonl")),
         ("REDHANDS_TARGETDB_FILE", path("redhands-targetdb.json")),
         ("REDHANDS_LOOT_DIR", path("loot")),
@@ -216,7 +236,13 @@ pub fn spawn_executor(config: &Config) -> Result<McpExecutor> {
         ("REDHANDS_ENGAGEMENT_DIR", path("engagements")),
         ("REDHANDS_WORKFLOW_STATE_DIR", path("workflow_state")),
         ("REDHANDS_PLUGINS_DIR", path("plugins")),
-    ];
+    ]
+}
+
+/// Spawn the pinned Go tool plane over stdio. All state files are placed next
+/// to the ledger so a developer's working directory is never polluted.
+pub fn spawn_executor(config: &Config) -> Result<McpExecutor> {
+    let env = executor_env(config);
     let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
     Ok(McpExecutor(StdioMcpClient::spawn(
         &config.redhands_binary,
@@ -291,6 +317,21 @@ fn make_planner(config: &Config) -> Result<Box<dyn Planner>> {
     }
 }
 
+/// Resolve the guard allowlist. An explicit list is authoritative; an empty
+/// one auto-admits only read-only, non-approval-gated tools advertised by the
+/// live server (fail-closed for everything else).
+fn effective_allowlist(config: &Config, available: &[ToolDescriptor]) -> Vec<String> {
+    if config.allowed_tools.is_empty() {
+        available
+            .iter()
+            .filter(|tool| tool.read_only && !tool.requires_approval)
+            .map(|tool| tool.name.clone())
+            .collect()
+    } else {
+        config.allowed_tools.clone()
+    }
+}
+
 fn execute<V: Verifier, A: ApprovalHandler + ?Sized, E: ToolExecutor>(
     config: &Config,
     ledger: &Ledger,
@@ -303,7 +344,10 @@ fn execute<V: Verifier, A: ApprovalHandler + ?Sized, E: ToolExecutor>(
     let available = executor.list_tools().context("tools/list failed")?;
     let planner = make_planner(config)?;
     let intents = planner.plan(&config.goal, &available)?;
-    let policy = Policy::new(config.allowed_tools.clone(), config.max_tool_calls);
+    let policy = Policy::new(
+        effective_allowlist(config, &available),
+        config.max_tool_calls,
+    );
     let mut findings = 0usize;
     // A retest is a real tool call and consumes the guard budget, so this is a
     // running count of calls rather than the index of the current intent.
@@ -396,6 +440,9 @@ fn execute<V: Verifier, A: ApprovalHandler + ?Sized, E: ToolExecutor>(
             evidence_seq: call_event.seq,
         })?;
         let verdict = verifier.verify(intent, &call.content);
+        // Keep the first verdict: a retest can only be called "fixed" if the
+        // first run was actually verified in the first place.
+        let first_verdict = verdict.value.clone();
         ledger.append(&EventBody::FindingVerified {
             finding_id: finding_id.clone(),
             verdict: verdict.value,
@@ -413,6 +460,13 @@ fn execute<V: Verifier, A: ApprovalHandler + ?Sized, E: ToolExecutor>(
             })?;
             if !retest_decision.allowed {
                 // No second call can be made, so the finding stays unconfirmed.
+                // Record the budget event too: the main-loop path does, and a
+                // silent denial here would hide the real reason in the report.
+                if retest_decision.reason.contains("budget") {
+                    ledger.append(&EventBody::BudgetExhausted {
+                        reason: retest_decision.reason.clone(),
+                    })?;
+                }
                 ledger.append(&EventBody::FindingRetested {
                     finding_id,
                     verdict: "cannot_confirm".to_string(),
@@ -454,12 +508,19 @@ fn execute<V: Verifier, A: ApprovalHandler + ?Sized, E: ToolExecutor>(
                 "cannot_confirm".to_string()
             } else {
                 let second = verifier.verify(intent, &retest_call.content);
-                match second.value.as_str() {
-                    "verified" if retest_call.content == call.content => {
+                match (first_verdict.as_str(), second.value.as_str()) {
+                    // Both runs verified: reproduce only if the output is
+                    // byte-identical, otherwise we cannot confirm anything.
+                    ("verified", "verified") if retest_call.content == call.content => {
                         "still_reproducible".to_string()
                     }
-                    "verified" => "cannot_confirm".to_string(),
-                    _ => "fixed".to_string(),
+                    ("verified", "verified") => "cannot_confirm".to_string(),
+                    // A fix is claimable only when the finding was verified
+                    // initially and the second run no longer verifies.
+                    ("verified", _) => "fixed".to_string(),
+                    // The first run never verified — there was no finding to
+                    // fix, regardless of what the second run reports.
+                    (_, _) => "cannot_confirm".to_string(),
                 }
             };
             ledger.append(&EventBody::FindingRetested {
@@ -524,11 +585,12 @@ mod tests {
             Ok("2026-07-28".to_string())
         }
         fn list_tools(&mut self) -> Result<Vec<ToolDescriptor>> {
-            Ok(vec![ToolDescriptor {
-                name: "redhands_health".to_string(),
-                description: "health".to_string(),
-                input_schema: serde_json::json!({"type": "object"}),
-            }])
+            Ok(vec![ToolDescriptor::new(
+                "redhands_health",
+                "health",
+                serde_json::json!({"type": "object"}),
+            )
+            .with_policy(true, false)])
         }
         fn call_with_responses(
             &mut self,
@@ -632,11 +694,12 @@ mod tests {
             Ok("2026-07-28".to_string())
         }
         fn list_tools(&mut self) -> Result<Vec<ToolDescriptor>> {
-            Ok(vec![ToolDescriptor {
-                name: "redhands_health".to_string(),
-                description: "health".to_string(),
-                input_schema: serde_json::json!({"type": "object"}),
-            }])
+            Ok(vec![ToolDescriptor::new(
+                "redhands_health",
+                "health",
+                serde_json::json!({"type": "object"}),
+            )
+            .with_policy(true, false)])
         }
         fn call_with_responses(
             &mut self,
@@ -761,6 +824,11 @@ mod tests {
         assert_eq!(view.retests.len(), 1);
         assert_eq!(view.retests[0].verdict, "cannot_confirm");
         assert_eq!(view.retests[0].evidence_seq, view.evidence[0].seq);
+        // The reason for denying the retest must be visible in the report.
+        assert!(view.budget_exhausted.is_some());
+        assert!(report_markdown(&config.ledger_path)
+            .unwrap()
+            .contains("Budget exhausted"));
     }
 
     #[test]
@@ -773,11 +841,12 @@ mod tests {
                 Ok("2026-07-28".to_string())
             }
             fn list_tools(&mut self) -> Result<Vec<ToolDescriptor>> {
-                Ok(vec![ToolDescriptor {
-                    name: "redhands_health".to_string(),
-                    description: "health".to_string(),
-                    input_schema: serde_json::json!({"type": "object"}),
-                }])
+                Ok(vec![ToolDescriptor::new(
+                    "redhands_health",
+                    "health",
+                    serde_json::json!({"type": "object"}),
+                )
+                .with_policy(true, false)])
             }
             fn call_with_responses(
                 &mut self,
@@ -818,5 +887,143 @@ mod tests {
         assert_eq!(view.evidence.len(), 2);
         assert_eq!(view.retests.len(), 1);
         assert_eq!(view.retests[0].verdict, "cannot_confirm");
+    }
+
+    #[test]
+    fn retest_never_claims_fixed_when_first_verdict_was_unverified() {
+        for outputs in [
+            ["### Status: FAILED", "### Status: FAILED"],
+            ["### Status: FAILED", "### Status: OK"],
+        ] {
+            let view = run_scripted(&outputs, |config| config.with_retest(true));
+            assert_eq!(view.verifications[0].verdict, "unverified");
+            assert_eq!(view.retests.len(), 1);
+            assert_eq!(view.retests[0].verdict, "cannot_confirm");
+        }
+    }
+
+    #[test]
+    fn toolsets_are_forwarded_to_the_child_environment() {
+        let dir = tempdir().unwrap();
+        let base = || {
+            Config::new(
+                "health check",
+                PathBuf::from("unused"),
+                dir.path().join("toolsets.db"),
+            )
+        };
+        let default_env = executor_env(&base());
+        assert_eq!(
+            default_env
+                .iter()
+                .find(|(key, _)| *key == "REDHANDS_TOOLSETS")
+                .map(|(_, value)| value.as_str()),
+            Some("health")
+        );
+
+        let configured = base().with_toolsets("nmap,vuln");
+        let env = executor_env(&configured);
+        assert_eq!(
+            env.iter()
+                .find(|(key, _)| *key == "REDHANDS_TOOLSETS")
+                .map(|(_, value)| value.as_str()),
+            Some("nmap,vuln")
+        );
+    }
+
+    #[test]
+    fn allowlist_semantics_explicit_list_overrides_catalog() {
+        let dir = tempdir().unwrap();
+        let catalog = vec![
+            ToolDescriptor::new(
+                "redhands_health",
+                "health",
+                serde_json::json!({"type": "object"}),
+            )
+            .with_policy(true, false),
+            ToolDescriptor::new(
+                "nmap_port_scan",
+                "scan",
+                serde_json::json!({"type": "object"}),
+            )
+            .with_policy(false, false),
+            ToolDescriptor::new(
+                "read_only_but_gated",
+                "gated",
+                serde_json::json!({"type": "object"}),
+            )
+            .with_policy(true, true),
+        ];
+
+        // Default: the deterministic allowlist stays unchanged.
+        let default = Config::new("goal", PathBuf::from("unused"), dir.path().join("allow.db"));
+        assert_eq!(effective_allowlist(&default, &catalog), ["redhands_health"]);
+
+        // Empty: auto-admit only read-only, non-approval-gated live tools.
+        let auto = default.clone().with_allowed_tools(Vec::<String>::new());
+        assert_eq!(effective_allowlist(&auto, &catalog), ["redhands_health"]);
+
+        // An explicit list is authoritative, even if it names a write tool.
+        let explicit = auto.with_allowed_tools(["nmap_port_scan"]);
+        assert_eq!(effective_allowlist(&explicit, &catalog), ["nmap_port_scan"]);
+    }
+
+    #[test]
+    fn retest_consumes_budget_and_records_both_guard_decisions() {
+        let dir = tempdir().unwrap();
+        let config = Config::new(
+            "health check",
+            PathBuf::from("unused"),
+            dir.path().join("retest-budget-ok.db"),
+        )
+        .with_retest(true)
+        .with_limits(2, 6);
+        let mut executor = MockExecutor {
+            calls: Vec::new(),
+            gate: false,
+        };
+        let view = run_with_executor(&config, &HeuristicVerifier, &DenyAll, &mut executor).unwrap();
+
+        assert!(view.completed);
+        assert_eq!(executor.calls.len(), 2);
+        assert!(view.budget_exhausted.is_none());
+        let events = Ledger::open(&config.ledger_path).unwrap().events().unwrap();
+        let decisions: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match &event.body {
+                EventBody::GuardDecision { intent_id, .. } => Some(intent_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(decisions, ["intent-1", "intent-1-retest"]);
+    }
+
+    #[test]
+    fn retest_does_not_replay_a_previous_approval_grant() {
+        let dir = tempdir().unwrap();
+        let config = Config::new(
+            "health check",
+            PathBuf::from("unused"),
+            dir.path().join("approval-retest.db"),
+        )
+        .with_retest(true);
+        let mut executor = MockExecutor {
+            calls: Vec::new(),
+            gate: true,
+        };
+        let view =
+            run_with_executor(&config, &HeuristicVerifier, &ApproveAll, &mut executor).unwrap();
+
+        assert!(view.completed);
+        // Initial prompt, approved re-issue, then a fresh prompt on retest. The
+        // single grant is spent on exactly one call; it is never replayed.
+        assert_eq!(executor.calls.len(), 3);
+        assert_eq!(view.approvals.len(), 1);
+        assert_eq!(view.approvals[0].approved, Some(true));
+        assert_eq!(view.retests.len(), 1);
+        assert_eq!(view.retests[0].verdict, "cannot_confirm");
+        assert!(view.tool_calls[1]
+            .content
+            .contains("requires operator approval"));
     }
 }
