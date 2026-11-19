@@ -42,6 +42,23 @@ pub struct VerificationView {
     pub evidence_seq: i64,
 }
 
+/// An evidence blob snapshot together with the ledger call it came from.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvidenceView {
+    pub intent_id: String,
+    pub tool: String,
+    pub hash: String,
+    pub seq: i64,
+}
+
+/// The result of re-running a tool to check a finding.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetestView {
+    pub finding_id: String,
+    pub verdict: String,
+    pub evidence_seq: i64,
+}
+
 /// Read-only view over the ledger. Rebuilt from events on demand.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct EngagementView {
@@ -52,6 +69,8 @@ pub struct EngagementView {
     pub findings: Vec<FindingView>,
     pub approvals: Vec<ApprovalView>,
     pub verifications: Vec<VerificationView>,
+    pub evidence: Vec<EvidenceView>,
+    pub retests: Vec<RetestView>,
     pub budget_exhausted: Option<String>,
     pub completed: bool,
     pub abort_reason: Option<String>,
@@ -148,6 +167,30 @@ pub fn project(events: &[StoredEvent]) -> EngagementView {
                 evidence_seq,
             } => {
                 view.verifications.push(VerificationView {
+                    finding_id: finding_id.clone(),
+                    verdict: verdict.clone(),
+                    evidence_seq: *evidence_seq,
+                });
+            }
+            EventBody::EvidenceStored {
+                intent_id,
+                tool,
+                hash,
+                seq,
+            } => {
+                view.evidence.push(EvidenceView {
+                    intent_id: intent_id.clone(),
+                    tool: tool.clone(),
+                    hash: hash.clone(),
+                    seq: *seq,
+                });
+            }
+            EventBody::FindingRetested {
+                finding_id,
+                verdict,
+                evidence_seq,
+            } => {
+                view.retests.push(RetestView {
                     finding_id: finding_id.clone(),
                     verdict: verdict.clone(),
                     evidence_seq: *evidence_seq,
@@ -255,6 +298,29 @@ pub fn render_markdown(view: &EngagementView) -> String {
             out.push_str(&format!(
                 "- **{}** → {} → ledger event #{}\n",
                 verification.finding_id, verification.verdict, verification.evidence_seq
+            ));
+        }
+        out.push('\n');
+    }
+
+    if !view.evidence.is_empty() {
+        out.push_str("## Evidence\n\n");
+        out.push_str("| Tool | Hash | Ledger seq |\n|---|---|---|\n");
+        for item in &view.evidence {
+            out.push_str(&format!(
+                "| {} | {} | {} |\n",
+                item.tool, item.hash, item.seq
+            ));
+        }
+        out.push('\n');
+    }
+
+    if !view.retests.is_empty() {
+        out.push_str("## Retests\n\n");
+        for retest in &view.retests {
+            out.push_str(&format!(
+                "- **{}** → {} → ledger event #{}\n",
+                retest.finding_id, retest.verdict, retest.evidence_seq
             ));
         }
         out.push('\n');
@@ -382,6 +448,61 @@ mod tests {
     }
 
     #[test]
+    fn project_evidence_and_retest_events() {
+        let hash = "ab".repeat(32);
+        let events = vec![
+            event(EventBody::EvidenceStored {
+                intent_id: "i1".into(),
+                tool: "redhands_health".into(),
+                hash: hash.clone(),
+                seq: 4,
+            }),
+            event(EventBody::FindingRetested {
+                finding_id: "finding-1".into(),
+                verdict: "still_reproducible".into(),
+                evidence_seq: 8,
+            }),
+        ];
+        let view = project(&events);
+
+        assert_eq!(view.evidence.len(), 1);
+        assert_eq!(view.evidence[0].intent_id, "i1");
+        assert_eq!(view.evidence[0].tool, "redhands_health");
+        assert_eq!(view.evidence[0].hash, hash);
+        assert_eq!(view.evidence[0].seq, 4);
+
+        assert_eq!(view.retests.len(), 1);
+        assert_eq!(view.retests[0].finding_id, "finding-1");
+        assert_eq!(view.retests[0].verdict, "still_reproducible");
+        assert_eq!(view.retests[0].evidence_seq, 8);
+    }
+
+    #[test]
+    fn render_markdown_evidence_and_retests() {
+        let hash = "cd".repeat(32);
+        let events = vec![
+            event(EventBody::EvidenceStored {
+                intent_id: "intent-1".into(),
+                tool: "redhands_health".into(),
+                hash: hash.clone(),
+                seq: 4,
+            }),
+            event(EventBody::FindingRetested {
+                finding_id: "finding-1".into(),
+                verdict: "fixed".into(),
+                evidence_seq: 8,
+            }),
+        ];
+        let md = render_markdown(&project(&events));
+
+        assert!(md.contains("## Evidence"));
+        assert!(md.contains("| Tool | Hash | Ledger seq |"));
+        assert!(md.contains(&format!("| redhands_health | {hash} | 4 |")));
+        assert!(md.contains("## Retests"));
+        assert!(md.contains("- **finding-1** → fixed → ledger event #8"));
+    }
+
+    #[test]
     fn render_markdown_new_sections() {
         let events = vec![
             event(EventBody::ApprovalRequested {
@@ -433,6 +554,8 @@ mod tests {
         let md = render_markdown(&view);
         assert!(!md.contains("## Approvals"));
         assert!(!md.contains("## Verification"));
+        assert!(!md.contains("## Evidence"));
+        assert!(!md.contains("## Retests"));
         assert!(!md.contains("Budget exhausted"));
     }
 }

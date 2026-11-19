@@ -57,6 +57,21 @@ pub enum EventBody {
     BudgetExhausted {
         reason: String,
     },
+    /// A tool output snapshot has been written to the evidence blob store.
+    /// `seq` is the sequence of the `ToolCallCompleted` event it snapshots.
+    EvidenceStored {
+        intent_id: String,
+        tool: String,
+        hash: String,
+        seq: i64,
+    },
+    /// The outcome of re-running a tool to check whether a finding still
+    /// reproduces. `evidence_seq` points at the retest's `ToolCallCompleted`.
+    FindingRetested {
+        finding_id: String,
+        verdict: String,
+        evidence_seq: i64,
+    },
 }
 
 impl EventBody {
@@ -73,6 +88,8 @@ impl EventBody {
             Self::ApprovalDecisionRecorded { .. } => "approval_decision_recorded",
             Self::FindingVerified { .. } => "finding_verified",
             Self::BudgetExhausted { .. } => "budget_exhausted",
+            Self::EvidenceStored { .. } => "evidence_stored",
+            Self::FindingRetested { .. } => "finding_retested",
         }
     }
 }
@@ -125,11 +142,50 @@ mod tests {
                 },
                 "budget_exhausted",
             ),
+            (
+                EventBody::EvidenceStored {
+                    intent_id: "i1".into(),
+                    tool: "redhands_health".into(),
+                    hash: "ab".repeat(32),
+                    seq: 4,
+                },
+                "evidence_stored",
+            ),
+            (
+                EventBody::FindingRetested {
+                    finding_id: "f1".into(),
+                    verdict: "still_reproducible".into(),
+                    evidence_seq: 7,
+                },
+                "finding_retested",
+            ),
         ];
         for (body, expected_kind) in cases {
             assert_eq!(body.kind(), expected_kind);
             let json = serde_json::to_value(&body).expect("serialize event");
             assert_eq!(json["kind"], expected_kind);
+        }
+    }
+
+    #[test]
+    fn evidence_events_round_trip_with_all_fields() {
+        let bodies = [
+            EventBody::EvidenceStored {
+                intent_id: "i1".into(),
+                tool: "redhands_health".into(),
+                hash: "cd".repeat(32),
+                seq: 4,
+            },
+            EventBody::FindingRetested {
+                finding_id: "finding-1".into(),
+                verdict: "fixed".into(),
+                evidence_seq: 9,
+            },
+        ];
+        for body in bodies {
+            let json = serde_json::to_string(&body).expect("serialize");
+            let decoded: EventBody = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(decoded, body);
         }
     }
 }

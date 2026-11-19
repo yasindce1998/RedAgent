@@ -4827,6 +4827,7 @@ dependencies = [
  "anyhow",
  "redagent-agent",
  "redagent-core",
+ "redagent-evidence",
  "redagent-guard",
  "redagent-llm",
  "redagent-mcp",
@@ -4857,6 +4858,16 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "redagent-evidence"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "sha2",
+ "tempfile",
 ]
 
 [[package]]

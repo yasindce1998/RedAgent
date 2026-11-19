@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Context, Result};
 use redagent_agent::{DeterministicPlanner, Intent, LlmPlanner, Planner, ToolDescriptor};
 use redagent_core::{render_markdown, EngagementView, EventBody, Ledger};
+use redagent_evidence::EvidenceStore;
 use redagent_guard::Policy;
 use redagent_llm::LlmClient;
 use redagent_mcp::{StdioMcpClient, ToolCallResult};
@@ -44,6 +45,8 @@ pub struct Config {
     pub planner_mode: PlannerMode,
     pub llm: Option<LlmConfig>,
     pub approval_mode: ApprovalMode,
+    /// When true, successful findings are retested by re-running the same tool.
+    pub retest: bool,
 }
 
 impl Config {
@@ -59,7 +62,14 @@ impl Config {
             planner_mode: PlannerMode::Deterministic,
             llm: None,
             approval_mode: ApprovalMode::Deny,
+            retest: false,
         }
+    }
+
+    /// Enable or disable the post-finding retest loop (default: disabled).
+    pub fn with_retest(mut self, enabled: bool) -> Self {
+        self.retest = enabled;
+        self
     }
 
     pub fn with_llm(mut self, llm: LlmConfig) -> Self {
@@ -247,7 +257,15 @@ pub fn run_with_executor<V: Verifier, A: ApprovalHandler + ?Sized, E: ToolExecut
         redhands_version: config.redhands_version.clone(),
     })?;
 
-    let result = execute(config, &ledger, executor, verifier, approvals);
+    let ledger_dir = config
+        .ledger_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let evidence =
+        EvidenceStore::new(ledger_dir.join("evidence_blobs")).context("opening evidence store")?;
+
+    let result = execute(config, &ledger, &evidence, executor, verifier, approvals);
     if let Err(error) = &result {
         ledger.append(&EventBody::EngagementAborted {
             reason: error.to_string(),
@@ -276,6 +294,7 @@ fn make_planner(config: &Config) -> Result<Box<dyn Planner>> {
 fn execute<V: Verifier, A: ApprovalHandler + ?Sized, E: ToolExecutor>(
     config: &Config,
     ledger: &Ledger,
+    evidence: &EvidenceStore,
     executor: &mut E,
     verifier: &V,
     approvals: &A,
@@ -286,8 +305,11 @@ fn execute<V: Verifier, A: ApprovalHandler + ?Sized, E: ToolExecutor>(
     let intents = planner.plan(&config.goal, &available)?;
     let policy = Policy::new(config.allowed_tools.clone(), config.max_tool_calls);
     let mut findings = 0usize;
+    // A retest is a real tool call and consumes the guard budget, so this is a
+    // running count of calls rather than the index of the current intent.
+    let mut calls_made = 0usize;
 
-    for (calls_made, intent) in intents.iter().enumerate() {
+    for intent in &intents {
         ledger.append(&EventBody::IntentCreated {
             id: intent.id.clone(),
             title: intent.title.clone(),
@@ -309,6 +331,7 @@ fn execute<V: Verifier, A: ApprovalHandler + ?Sized, E: ToolExecutor>(
             }
             return Err(anyhow!("guard denied '{}': {}", intent.id, decision.reason));
         }
+        calls_made += 1;
 
         let mut call = executor.call(&intent.tool, intent.arguments.clone())?;
         if call.result_type.as_deref() == Some("input_required") {
@@ -356,6 +379,15 @@ fn execute<V: Verifier, A: ApprovalHandler + ?Sized, E: ToolExecutor>(
         if call.is_error {
             return Err(anyhow!("tool '{}' reported an error", intent.tool));
         }
+        store_evidence(
+            evidence,
+            ledger,
+            &intent.id,
+            &intent.tool,
+            &call.content,
+            call_event.seq,
+        )?;
+
         let finding_id = format!("finding-{}", findings + 1);
         ledger.append(&EventBody::FindingRecorded {
             id: finding_id.clone(),
@@ -365,14 +397,102 @@ fn execute<V: Verifier, A: ApprovalHandler + ?Sized, E: ToolExecutor>(
         })?;
         let verdict = verifier.verify(intent, &call.content);
         ledger.append(&EventBody::FindingVerified {
-            finding_id,
+            finding_id: finding_id.clone(),
             verdict: verdict.value,
             evidence_seq: call_event.seq,
         })?;
         findings += 1;
+
+        if config.retest {
+            let retest_id = format!("{}-retest", intent.id);
+            let retest_decision = policy.check(&intent.tool, calls_made);
+            ledger.append(&EventBody::GuardDecision {
+                intent_id: retest_id.clone(),
+                allowed: retest_decision.allowed,
+                reason: retest_decision.reason.clone(),
+            })?;
+            if !retest_decision.allowed {
+                // No second call can be made, so the finding stays unconfirmed.
+                ledger.append(&EventBody::FindingRetested {
+                    finding_id,
+                    verdict: "cannot_confirm".to_string(),
+                    evidence_seq: call_event.seq,
+                })?;
+                continue;
+            }
+            calls_made += 1;
+
+            // Re-run the same tool with the same arguments. An error (or a
+            // fresh approval prompt) is recorded as evidence but downgrades the
+            // verdict to "cannot_confirm" instead of aborting the engagement.
+            let retest_call = executor
+                .call(&intent.tool, intent.arguments.clone())
+                .unwrap_or_else(|error| ToolCallResult {
+                    content: format!("retest failed: {error:#}"),
+                    is_error: true,
+                    result_type: None,
+                    input_requests: None,
+                });
+            let retest_failed = retest_call.is_error
+                || retest_call.result_type.as_deref() == Some("input_required");
+            let retest_event = ledger.append(&EventBody::ToolCallCompleted {
+                intent_id: retest_id.clone(),
+                tool: intent.tool.clone(),
+                content: retest_call.content.clone(),
+                is_error: retest_call.is_error,
+            })?;
+            store_evidence(
+                evidence,
+                ledger,
+                &retest_id,
+                &intent.tool,
+                &retest_call.content,
+                retest_event.seq,
+            )?;
+
+            let retest_verdict = if retest_failed {
+                "cannot_confirm".to_string()
+            } else {
+                let second = verifier.verify(intent, &retest_call.content);
+                match second.value.as_str() {
+                    "verified" if retest_call.content == call.content => {
+                        "still_reproducible".to_string()
+                    }
+                    "verified" => "cannot_confirm".to_string(),
+                    _ => "fixed".to_string(),
+                }
+            };
+            ledger.append(&EventBody::FindingRetested {
+                finding_id,
+                verdict: retest_verdict,
+                evidence_seq: retest_event.seq,
+            })?;
+        }
     }
 
     ledger.append(&EventBody::EngagementCompleted { findings })?;
+    Ok(())
+}
+
+/// Persist a tool-output snapshot and record its ledger pointer. Fails closed
+/// so an engagement never claims evidence that was not actually written.
+fn store_evidence(
+    evidence: &EvidenceStore,
+    ledger: &Ledger,
+    intent_id: &str,
+    tool: &str,
+    content: &str,
+    call_seq: i64,
+) -> Result<()> {
+    let hash = evidence
+        .put(content)
+        .with_context(|| format!("storing evidence for intent '{intent_id}'"))?;
+    ledger.append(&EventBody::EvidenceStored {
+        intent_id: intent_id.to_string(),
+        tool: tool.to_string(),
+        hash,
+        seq: call_seq,
+    })?;
     Ok(())
 }
 
@@ -499,5 +619,204 @@ mod tests {
         assert_eq!(executor.calls.len(), 1);
         let view = load_view(&config.ledger_path).unwrap();
         assert!(view.abort_reason.unwrap().contains("approval denied"));
+    }
+
+    /// Executor that returns a scripted content string per call.
+    struct SequenceExecutor {
+        contents: Vec<String>,
+        calls: usize,
+    }
+
+    impl ToolExecutor for SequenceExecutor {
+        fn initialize(&mut self) -> Result<String> {
+            Ok("2026-07-28".to_string())
+        }
+        fn list_tools(&mut self) -> Result<Vec<ToolDescriptor>> {
+            Ok(vec![ToolDescriptor {
+                name: "redhands_health".to_string(),
+                description: "health".to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }])
+        }
+        fn call_with_responses(
+            &mut self,
+            _tool: &str,
+            _arguments: Value,
+            _input_responses: Option<Value>,
+        ) -> Result<ToolCallResult> {
+            let index = self.calls;
+            self.calls += 1;
+            Ok(ToolCallResult {
+                content: self
+                    .contents
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_else(|| "### Status: OK".to_string()),
+                is_error: false,
+                result_type: None,
+                input_requests: None,
+            })
+        }
+    }
+
+    fn run_scripted(contents: &[&str], configure: impl FnOnce(Config) -> Config) -> EngagementView {
+        let dir = tempdir().unwrap();
+        let config = configure(Config::new(
+            "health check",
+            PathBuf::from("unused"),
+            dir.path().join("retest.db"),
+        ));
+        let mut executor = SequenceExecutor {
+            contents: contents.iter().map(|text| text.to_string()).collect(),
+            calls: 0,
+        };
+        run_with_executor(&config, &HeuristicVerifier, &DenyAll, &mut executor).unwrap()
+    }
+
+    #[test]
+    fn retest_records_evidence_and_retest_events() {
+        let dir = tempdir().unwrap();
+        let config = Config::new(
+            "health check",
+            PathBuf::from("unused"),
+            dir.path().join("retest.db"),
+        )
+        .with_retest(true);
+        let mut executor = MockExecutor {
+            calls: Vec::new(),
+            gate: false,
+        };
+        let view = run_with_executor(&config, &HeuristicVerifier, &DenyAll, &mut executor).unwrap();
+
+        assert!(view.completed);
+        assert_eq!(executor.calls, vec!["redhands_health", "redhands_health"]);
+        assert_eq!(view.evidence.len(), 2);
+        assert_eq!(view.evidence[0].intent_id, "intent-1");
+        assert_eq!(view.evidence[1].intent_id, "intent-1-retest");
+        for item in &view.evidence {
+            assert_eq!(item.tool, "redhands_health");
+            assert_eq!(item.hash.len(), 64);
+        }
+        assert_eq!(view.retests.len(), 1);
+        assert_eq!(view.retests[0].finding_id, "finding-1");
+        assert_eq!(view.retests[0].verdict, "still_reproducible");
+        assert_eq!(view.retests[0].evidence_seq, view.evidence[1].seq);
+
+        // The retest guard decision and the blob itself are both persisted.
+        let events = Ledger::open(&config.ledger_path).unwrap().events().unwrap();
+        assert!(events.iter().any(|event| matches!(
+            &event.body,
+            EventBody::GuardDecision { intent_id, .. } if intent_id == "intent-1-retest"
+        )));
+        let store = EvidenceStore::new(dir.path().join("evidence_blobs")).unwrap();
+        assert_eq!(store.get(&view.evidence[0].hash).unwrap(), "### Status: OK");
+        assert_eq!(store.get(&view.evidence[1].hash).unwrap(), "### Status: OK");
+
+        let markdown = report_markdown(&config.ledger_path).unwrap();
+        assert!(markdown.contains("## Evidence"));
+        assert!(markdown.contains("| Tool | Hash | Ledger seq |"));
+        assert!(markdown.contains("## Retests"));
+        assert!(markdown.contains("**finding-1** → still_reproducible"));
+    }
+
+    #[test]
+    fn retest_verdict_fixed_when_second_verdict_fails() {
+        let view = run_scripted(&["### Status: OK", "### Status: FAILED"], |config| {
+            config.with_retest(true)
+        });
+        assert_eq!(view.retests.len(), 1);
+        assert_eq!(view.retests[0].verdict, "fixed");
+        assert_eq!(view.evidence.len(), 2);
+    }
+
+    #[test]
+    fn retest_verdict_cannot_confirm_when_output_differs() {
+        let view = run_scripted(
+            &["### Status: OK", "### Status: OK on second run"],
+            |config| config.with_retest(true),
+        );
+        assert_eq!(view.retests.len(), 1);
+        assert_eq!(view.retests[0].verdict, "cannot_confirm");
+    }
+
+    #[test]
+    fn retest_budget_denial_records_cannot_confirm_without_second_call() {
+        let dir = tempdir().unwrap();
+        let config = Config::new(
+            "health check",
+            PathBuf::from("unused"),
+            dir.path().join("retest-budget.db"),
+        )
+        .with_retest(true)
+        .with_limits(1, 6);
+        let mut executor = MockExecutor {
+            calls: Vec::new(),
+            gate: false,
+        };
+        let view = run_with_executor(&config, &HeuristicVerifier, &DenyAll, &mut executor).unwrap();
+
+        assert!(view.completed);
+        assert_eq!(executor.calls.len(), 1);
+        assert_eq!(view.evidence.len(), 1);
+        assert_eq!(view.retests.len(), 1);
+        assert_eq!(view.retests[0].verdict, "cannot_confirm");
+        assert_eq!(view.retests[0].evidence_seq, view.evidence[0].seq);
+    }
+
+    #[test]
+    fn retest_output_error_is_recorded_without_aborting() {
+        struct FailingSecondCall {
+            calls: usize,
+        }
+        impl ToolExecutor for FailingSecondCall {
+            fn initialize(&mut self) -> Result<String> {
+                Ok("2026-07-28".to_string())
+            }
+            fn list_tools(&mut self) -> Result<Vec<ToolDescriptor>> {
+                Ok(vec![ToolDescriptor {
+                    name: "redhands_health".to_string(),
+                    description: "health".to_string(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                }])
+            }
+            fn call_with_responses(
+                &mut self,
+                _tool: &str,
+                _arguments: Value,
+                _input_responses: Option<Value>,
+            ) -> Result<ToolCallResult> {
+                self.calls += 1;
+                if self.calls == 2 {
+                    return Err(anyhow!("retest transport exploded"));
+                }
+                Ok(ToolCallResult {
+                    content: "### Status: OK".to_string(),
+                    is_error: false,
+                    result_type: None,
+                    input_requests: None,
+                })
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let config = Config::new(
+            "health check",
+            PathBuf::from("unused"),
+            dir.path().join("retest-error.db"),
+        )
+        .with_retest(true);
+        let mut executor = FailingSecondCall { calls: 0 };
+        let view = run_with_executor(&config, &HeuristicVerifier, &DenyAll, &mut executor).unwrap();
+
+        assert!(view.completed);
+        assert_eq!(executor.calls, 2);
+        assert_eq!(view.tool_calls.len(), 2);
+        assert!(view.tool_calls[1].is_error);
+        assert!(view.tool_calls[1]
+            .content
+            .contains("retest transport exploded"));
+        assert_eq!(view.evidence.len(), 2);
+        assert_eq!(view.retests.len(), 1);
+        assert_eq!(view.retests[0].verdict, "cannot_confirm");
     }
 }
