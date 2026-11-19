@@ -62,6 +62,14 @@ pub struct RunRequest {
     pub max_intents: usize,
     #[serde(default)]
     pub retest: bool,
+    #[serde(default = "default_toolsets")]
+    pub toolsets: String,
+    #[serde(default)]
+    pub allow_read_only: bool,
+}
+
+fn default_toolsets() -> String {
+    "health".to_string()
 }
 
 pub fn default_max() -> usize {
@@ -467,13 +475,19 @@ async fn create_engagement(
         None => generated_id(&state),
     };
     let ledger_path = state.inner.config.ledger_dir.join(format!("{id}.db"));
-    let mut config = AppConfig::new(
+    let config = AppConfig::new(
         request.goal.clone(),
         state.inner.config.redhands_binary.clone(),
         ledger_path,
     )
     .with_limits(request.max_tool_calls, request.max_intents)
-    .with_retest(request.retest);
+    .with_retest(request.retest)
+    .with_toolsets(&request.toolsets);
+    let mut config = if request.allow_read_only {
+        config.with_allowed_tools(Vec::<String>::new())
+    } else {
+        config
+    };
 
     if request.llm {
         let api_key = std::env::var("REDAGENT_LLM_API_KEY").ok();

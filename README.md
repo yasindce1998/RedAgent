@@ -62,10 +62,13 @@ export REDAGENT_LLM_BASE_URL="https://your-openai-compatible-endpoint/v1"
 export REDAGENT_LLM_MODEL="your-model"
 
 ./target/release/redagent run "enumerate the lab and report exposure" \
-  --llm --redhands /path/to/redhands --ledger llm-run.db
+  --llm --toolsets nmap,vuln --allow-read-only \
+  --redhands /path/to/redhands --ledger llm-run.db
 ```
 
-The planner receives the real `tools/list` catalog, returns JSON-only intents, and every tool name and argument object is validated before execution — a hallucinated tool never reaches RedHands. Malformed plans get exactly one retry, then abort into the ledger.
+The planner receives the real `tools/list` catalog, returns JSON-only intents, and every tool name, argument object and policy flag is validated before execution — a hallucinated tool never reaches RedHands. Malformed plans get exactly one retry, then abort into the ledger.
+
+`--toolsets` takes **toolset ids**, not install profiles (`nmap,vuln` = nmap + nuclei; `all` is not a valid value). Without `--allow-read-only` the guard permits only `redhands_health`; with it, the live catalog's read-only, non-gated tools are admitted automatically. Gated tools still require operator approval.
 
 ### Approvals
 
