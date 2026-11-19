@@ -5205,6 +5205,7 @@ dependencies = [
  "futures-util",
  "redagent-app",
  "redagent-core",
+ "redagent-export",
  "serde",
  "serde_json",
  "tempfile",
@@ -5235,6 +5236,7 @@ dependencies = [
  "redagent-api",
  "redagent-app",
  "redagent-core",
+ "redagent-export",
  "tokio",
 ]
 
