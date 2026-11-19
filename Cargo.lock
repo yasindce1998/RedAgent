@@ -5224,8 +5224,10 @@ dependencies = [
  "redagent-guard",
  "redagent-llm",
  "redagent-mcp",
+ "redagent-scope",
  "serde_json",
  "tempfile",
+ "tracing",
 ]
 
 [[package]]

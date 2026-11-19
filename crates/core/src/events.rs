@@ -1,6 +1,21 @@
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 
+/// A human-readable summary of a tool call, presented to the operator when
+/// approval is requested. Persisted with the `ApprovalRequested` event so a
+/// report can show exactly what was about to run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CallProposal {
+    pub tool: String,
+    /// Pretty-printed JSON arguments.
+    pub arguments: String,
+    /// One of `in_scope`, `out_of_scope`, `unresolvable`, `not_declared`.
+    pub scope_verdict: String,
+    pub risk_flags: Vec<String>,
+    /// Line-based diff against the previous call to the same tool, if any.
+    pub diff: Option<String>,
+}
+
 /// The only things that can happen in an engagement.
 ///
 /// This enum deliberately supports **forward compatibility**: a ledger written
@@ -53,6 +68,10 @@ pub enum EventBody {
         intent_id: String,
         tool: String,
         request_id: String,
+        /// Added in a later schema; `#[serde(default)]` keeps v0.3.1 ledgers
+        /// (which had no proposal) readable.
+        #[serde(default)]
+        proposal: Option<CallProposal>,
     },
     ApprovalDecisionRecorded {
         intent_id: String,
@@ -82,6 +101,25 @@ pub enum EventBody {
         verdict: String,
         evidence_seq: i64,
     },
+    /// A target failed the declared scope check. The tool was never called.
+    ScopeDenied {
+        intent_id: String,
+        tool: String,
+        reason: String,
+    },
+    /// Untrusted text that looks like a prompt-injection attempt. Detection is
+    /// wired by a higher layer; the ledger only stores the signal.
+    InjectionSignal {
+        intent_id: String,
+        source: String,
+        signal: String,
+        detail: String,
+    },
+    /// The planner produced an unusable plan, so it was rejected and retried.
+    PlanRejected {
+        reason: String,
+        attempt: u32,
+    },
     /// An event kind written by a future version of RedAgent that this reader
     /// does not recognize. `event_kind` is the original `kind` tag and `raw` is
     /// the payload as stored in the ledger. Unknown events are inert: they do
@@ -110,6 +148,9 @@ const KNOWN_KINDS: &[&str] = &[
     "budget_exhausted",
     "evidence_stored",
     "finding_retested",
+    "scope_denied",
+    "injection_signal",
+    "plan_rejected",
 ];
 
 /// Internal tag used when serializing [`EventBody::Unknown`]. Reserved so it
@@ -159,6 +200,10 @@ enum KnownEventBody {
         intent_id: String,
         tool: String,
         request_id: String,
+        /// Added in a later schema; `#[serde(default)]` keeps v0.3.1 ledgers
+        /// (which had no proposal) readable.
+        #[serde(default)]
+        proposal: Option<CallProposal>,
     },
     ApprovalDecisionRecorded {
         intent_id: String,
@@ -183,6 +228,21 @@ enum KnownEventBody {
         finding_id: String,
         verdict: String,
         evidence_seq: i64,
+    },
+    ScopeDenied {
+        intent_id: String,
+        tool: String,
+        reason: String,
+    },
+    InjectionSignal {
+        intent_id: String,
+        source: String,
+        signal: String,
+        detail: String,
+    },
+    PlanRejected {
+        reason: String,
+        attempt: u32,
     },
 }
 
@@ -246,10 +306,12 @@ impl From<KnownEventBody> for EventBody {
                 intent_id,
                 tool,
                 request_id,
+                proposal,
             } => Self::ApprovalRequested {
                 intent_id,
                 tool,
                 request_id,
+                proposal,
             },
             KnownEventBody::ApprovalDecisionRecorded {
                 intent_id,
@@ -290,6 +352,29 @@ impl From<KnownEventBody> for EventBody {
                 verdict,
                 evidence_seq,
             },
+            KnownEventBody::ScopeDenied {
+                intent_id,
+                tool,
+                reason,
+            } => Self::ScopeDenied {
+                intent_id,
+                tool,
+                reason,
+            },
+            KnownEventBody::InjectionSignal {
+                intent_id,
+                source,
+                signal,
+                detail,
+            } => Self::InjectionSignal {
+                intent_id,
+                source,
+                signal,
+                detail,
+            },
+            KnownEventBody::PlanRejected { reason, attempt } => {
+                Self::PlanRejected { reason, attempt }
+            }
         }
     }
 }
@@ -369,6 +454,9 @@ impl EventBody {
             Self::BudgetExhausted { .. } => "budget_exhausted",
             Self::EvidenceStored { .. } => "evidence_stored",
             Self::FindingRetested { .. } => "finding_retested",
+            Self::ScopeDenied { .. } => "scope_denied",
+            Self::InjectionSignal { .. } => "injection_signal",
+            Self::PlanRejected { .. } => "plan_rejected",
             // The original tag is preserved in `event_kind`.
             Self::Unknown { .. } => "unknown",
         }
@@ -408,6 +496,7 @@ mod tests {
                     intent_id: "i1".into(),
                     tool: "t".into(),
                     request_id: "r1".into(),
+                    proposal: None,
                 },
                 "approval_requested",
             ),
@@ -518,6 +607,7 @@ mod tests {
                 intent_id: "i".into(),
                 tool: "x".into(),
                 request_id: "r".into(),
+                proposal: None,
             },
             EventBody::ApprovalDecisionRecorded {
                 intent_id: "i".into(),
@@ -540,6 +630,21 @@ mod tests {
                 finding_id: "f".into(),
                 verdict: "v".into(),
                 evidence_seq: 1,
+            },
+            EventBody::ScopeDenied {
+                intent_id: "i".into(),
+                tool: "x".into(),
+                reason: "r".into(),
+            },
+            EventBody::InjectionSignal {
+                intent_id: "i".into(),
+                source: "tool_output".into(),
+                signal: "ignore_previous".into(),
+                detail: "d".into(),
+            },
+            EventBody::PlanRejected {
+                reason: "r".into(),
+                attempt: 1,
             },
         ];
         assert_eq!(bodies.len(), KNOWN_KINDS.len());
@@ -646,5 +751,72 @@ mod tests {
         }
         let decoded: Probe = serde_json::from_str(r#"{"kind":"future_kind","value":7}"#).unwrap();
         assert_eq!(decoded, Probe::Other);
+    }
+
+    #[test]
+    fn trust_events_round_trip_with_all_fields() {
+        let bodies = [
+            EventBody::ScopeDenied {
+                intent_id: "i1".into(),
+                tool: "redhands_scan".into(),
+                reason: "target 192.168.1.1 is outside the declared scope".into(),
+            },
+            EventBody::InjectionSignal {
+                intent_id: "i1".into(),
+                source: "tool_output".into(),
+                signal: "ignore_previous_instructions".into(),
+                detail: "untrusted text tried to change the guard rules".into(),
+            },
+            EventBody::PlanRejected {
+                reason: "planner emitted an unknown tool".into(),
+                attempt: 2,
+            },
+        ];
+        for body in bodies {
+            let json = serde_json::to_string(&body).expect("serialize event");
+            let decoded: EventBody = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(decoded, body);
+            assert_eq!(EventBody::from_payload(&json).unwrap(), body);
+            assert!(KNOWN_KINDS.contains(&body.kind()));
+        }
+    }
+
+    #[test]
+    fn approval_requested_round_trips_with_a_proposal() {
+        let proposal = CallProposal {
+            tool: "redhands_scan".into(),
+            arguments: "{\n  \"host\": \"10.0.0.5\"\n}".into(),
+            scope_verdict: "in_scope".into(),
+            risk_flags: vec!["not_read_only".into(), "requires_approval".into()],
+            diff: Some("- \"host\": \"10.0.0.4\"\n+ \"host\": \"10.0.0.5\"\n".into()),
+        };
+        let body = EventBody::ApprovalRequested {
+            intent_id: "i1".into(),
+            tool: "redhands_scan".into(),
+            request_id: "req-1".into(),
+            proposal: Some(proposal.clone()),
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        let decoded: EventBody = serde_json::from_str(&json).unwrap();
+        match decoded {
+            EventBody::ApprovalRequested { proposal: got, .. } => assert_eq!(got, Some(proposal)),
+            other => panic!("expected ApprovalRequested, got {other:?}"),
+        }
+    }
+
+    /// v0.3.1 ledgers have no `proposal` field. The `#[serde(default)]` on the
+    /// new field must let them deserialize into `proposal: None`.
+    #[test]
+    fn old_approval_requested_payload_without_proposal_defaults_to_none() {
+        let payload = r#"{"kind":"approval_requested","intent_id":"i1","tool":"redhands_health","request_id":"req-1"}"#;
+        for body in [
+            EventBody::from_payload(payload).unwrap(),
+            serde_json::from_str::<EventBody>(payload).unwrap(),
+        ] {
+            match body {
+                EventBody::ApprovalRequested { proposal, .. } => assert_eq!(proposal, None),
+                other => panic!("expected ApprovalRequested, got {other:?}"),
+            }
+        }
     }
 }

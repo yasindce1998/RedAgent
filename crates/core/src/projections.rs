@@ -59,6 +59,30 @@ pub struct RetestView {
     pub evidence_seq: i64,
 }
 
+/// A target (or tool) that was stopped by the scope boundary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScopeDenialView {
+    pub intent_id: String,
+    pub tool: String,
+    pub reason: String,
+}
+
+/// An untrusted-text injection signal recorded for later display.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InjectionSignalView {
+    pub intent_id: String,
+    pub source: String,
+    pub signal: String,
+    pub detail: String,
+}
+
+/// A planner output that was rejected instead of being executed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanRejectionView {
+    pub reason: String,
+    pub attempt: u32,
+}
+
 /// Read-only view over the ledger. Rebuilt from events on demand.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct EngagementView {
@@ -71,6 +95,9 @@ pub struct EngagementView {
     pub verifications: Vec<VerificationView>,
     pub evidence: Vec<EvidenceView>,
     pub retests: Vec<RetestView>,
+    pub scope_denials: Vec<ScopeDenialView>,
+    pub injection_signals: Vec<InjectionSignalView>,
+    pub plan_rejections: Vec<PlanRejectionView>,
     pub budget_exhausted: Option<String>,
     pub completed: bool,
     pub abort_reason: Option<String>,
@@ -140,6 +167,7 @@ pub fn project(events: &[StoredEvent]) -> EngagementView {
                 intent_id,
                 tool,
                 request_id,
+                ..
             } => {
                 view.approvals.push(ApprovalView {
                     intent_id: intent_id.clone(),
@@ -200,6 +228,36 @@ pub fn project(events: &[StoredEvent]) -> EngagementView {
                     finding_id: finding_id.clone(),
                     verdict: verdict.clone(),
                     evidence_seq: *evidence_seq,
+                });
+            }
+            EventBody::ScopeDenied {
+                intent_id,
+                tool,
+                reason,
+            } => {
+                view.scope_denials.push(ScopeDenialView {
+                    intent_id: intent_id.clone(),
+                    tool: tool.clone(),
+                    reason: reason.clone(),
+                });
+            }
+            EventBody::InjectionSignal {
+                intent_id,
+                source,
+                signal,
+                detail,
+            } => {
+                view.injection_signals.push(InjectionSignalView {
+                    intent_id: intent_id.clone(),
+                    source: source.clone(),
+                    signal: signal.clone(),
+                    detail: detail.clone(),
+                });
+            }
+            EventBody::PlanRejected { reason, attempt } => {
+                view.plan_rejections.push(PlanRejectionView {
+                    reason: reason.clone(),
+                    attempt: *attempt,
                 });
             }
             EventBody::BudgetExhausted { reason } => {
@@ -335,6 +393,41 @@ pub fn render_markdown(view: &EngagementView) -> String {
         out.push('\n');
     }
 
+    if !view.scope_denials.is_empty() {
+        out.push_str("## Scope denials\n\n");
+        out.push_str("| Intent | Tool | Reason |\n|---|---|---|\n");
+        for denial in &view.scope_denials {
+            out.push_str(&format!(
+                "| {} | {} | {} |\n",
+                denial.intent_id, denial.tool, denial.reason
+            ));
+        }
+        out.push('\n');
+    }
+
+    if !view.injection_signals.is_empty() {
+        out.push_str("## Injection signals\n\n");
+        out.push_str("| Intent | Source | Signal | Detail |\n|---|---|---|---|\n");
+        for signal in &view.injection_signals {
+            out.push_str(&format!(
+                "| {} | {} | {} | {} |\n",
+                signal.intent_id, signal.source, signal.signal, signal.detail
+            ));
+        }
+        out.push('\n');
+    }
+
+    if !view.plan_rejections.is_empty() {
+        out.push_str("## Plan rejections\n\n");
+        for rejection in &view.plan_rejections {
+            out.push_str(&format!(
+                "- **Attempt {}:** {}\n",
+                rejection.attempt, rejection.reason
+            ));
+        }
+        out.push('\n');
+    }
+
     out
 }
 
@@ -403,11 +496,13 @@ mod tests {
                 intent_id: "i1".into(),
                 tool: "redhands_scan".into(),
                 request_id: "req-1".into(),
+                proposal: None,
             }),
             event(EventBody::ApprovalRequested {
                 intent_id: "i2".into(),
                 tool: "redhands_exec".into(),
                 request_id: "req-2".into(),
+                proposal: None,
             }),
             event(EventBody::ApprovalDecisionRecorded {
                 intent_id: "i1".into(),
@@ -518,6 +613,7 @@ mod tests {
                 intent_id: "i1".into(),
                 tool: "redhands_scan".into(),
                 request_id: "req-1".into(),
+                proposal: None,
             }),
             event(EventBody::ApprovalDecisionRecorded {
                 intent_id: "i1".into(),
@@ -528,6 +624,7 @@ mod tests {
                 intent_id: "i2".into(),
                 tool: "redhands_exec".into(),
                 request_id: "req-2".into(),
+                proposal: None,
             }),
             event(EventBody::FindingVerified {
                 finding_id: "f1".into(),
@@ -575,6 +672,7 @@ mod tests {
                 intent_id: "i1".into(),
                 tool: "first".into(),
                 request_id: "req-1".into(),
+                proposal: None,
             }),
             event(EventBody::ApprovalDecisionRecorded {
                 intent_id: "i1".into(),
@@ -585,6 +683,7 @@ mod tests {
                 intent_id: "i1".into(),
                 tool: "second".into(),
                 request_id: "req-2".into(),
+                proposal: None,
             }),
             event(EventBody::ApprovalDecisionRecorded {
                 intent_id: "i1".into(),
@@ -743,5 +842,109 @@ mod tests {
         let md = render_markdown(&project(&[]));
         assert!(md.contains("# RedAgent engagement report"));
         assert!(md.contains("_none_"));
+    }
+
+    #[test]
+    fn project_trust_and_rejection_events() {
+        let events = vec![
+            event(EventBody::ScopeDenied {
+                intent_id: "intent-1".into(),
+                tool: "redhands_scan".into(),
+                reason: "target 192.168.1.1 is outside scope".into(),
+            }),
+            event(EventBody::InjectionSignal {
+                intent_id: "intent-2".into(),
+                source: "tool_output".into(),
+                signal: "ignore_previous_instructions".into(),
+                detail: "embedded directive".into(),
+            }),
+            event(EventBody::PlanRejected {
+                reason: "unknown tool".into(),
+                attempt: 2,
+            }),
+        ];
+        let view = project(&events);
+
+        assert_eq!(view.scope_denials.len(), 1);
+        assert_eq!(view.scope_denials[0].intent_id, "intent-1");
+        assert_eq!(view.scope_denials[0].tool, "redhands_scan");
+        assert_eq!(
+            view.scope_denials[0].reason,
+            "target 192.168.1.1 is outside scope"
+        );
+
+        assert_eq!(view.injection_signals.len(), 1);
+        assert_eq!(view.injection_signals[0].intent_id, "intent-2");
+        assert_eq!(view.injection_signals[0].source, "tool_output");
+        assert_eq!(
+            view.injection_signals[0].signal,
+            "ignore_previous_instructions"
+        );
+        assert_eq!(view.injection_signals[0].detail, "embedded directive");
+
+        assert_eq!(view.plan_rejections.len(), 1);
+        assert_eq!(view.plan_rejections[0].reason, "unknown tool");
+        assert_eq!(view.plan_rejections[0].attempt, 2);
+    }
+
+    #[test]
+    fn render_markdown_trust_and_rejection_sections() {
+        let events = vec![
+            event(EventBody::ScopeDenied {
+                intent_id: "intent-1".into(),
+                tool: "redhands_scan".into(),
+                reason: "target 192.168.1.1 is outside scope".into(),
+            }),
+            event(EventBody::InjectionSignal {
+                intent_id: "intent-2".into(),
+                source: "tool_output".into(),
+                signal: "ignore_previous_instructions".into(),
+                detail: "embedded directive".into(),
+            }),
+            event(EventBody::PlanRejected {
+                reason: "unknown tool".into(),
+                attempt: 2,
+            }),
+        ];
+        let md = render_markdown(&project(&events));
+
+        assert!(md.contains("## Scope denials"));
+        assert!(md.contains("| Intent | Tool | Reason |"));
+        assert!(md.contains("| intent-1 | redhands_scan | target 192.168.1.1 is outside scope |"));
+
+        assert!(md.contains("## Injection signals"));
+        assert!(md.contains("| Intent | Source | Signal | Detail |"));
+        assert!(md.contains(
+            "| intent-2 | tool_output | ignore_previous_instructions | embedded directive |"
+        ));
+
+        assert!(md.contains("## Plan rejections"));
+        assert!(md.contains("- **Attempt 2:** unknown tool"));
+    }
+
+    #[test]
+    fn trust_sections_are_omitted_when_empty() {
+        let md = render_markdown(&project(&[]));
+        assert!(!md.contains("## Scope denials"));
+        assert!(!md.contains("## Injection signals"));
+        assert!(!md.contains("## Plan rejections"));
+    }
+
+    #[test]
+    fn plan_rejection_events_keep_ledger_order() {
+        let events = vec![
+            event(EventBody::PlanRejected {
+                reason: "first".into(),
+                attempt: 1,
+            }),
+            event(EventBody::PlanRejected {
+                reason: "second".into(),
+                attempt: 2,
+            }),
+        ];
+        let md = render_markdown(&project(&events));
+        let first = md.find("**Attempt 1:** first").unwrap();
+        let second = md.find("**Attempt 2:** second").unwrap();
+        assert!(first < second);
     }
 }

@@ -1,15 +1,17 @@
 //! Wiring for Phase 1: ledger → planner → guard → MCP (with approval
 //! elicitation) → verifier → ledger → report. One assembly point.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use redagent_agent::{DeterministicPlanner, Intent, LlmPlanner, Planner, ToolDescriptor};
-use redagent_core::{render_markdown, EngagementView, EventBody, Ledger};
+use redagent_core::{render_markdown, CallProposal, EngagementView, EventBody, Ledger};
 use redagent_evidence::EvidenceStore;
-use redagent_guard::Policy;
+use redagent_guard::{evaluate_call, CallContext, GuardEffect, Policy};
 use redagent_llm::LlmClient;
 use redagent_mcp::{StdioMcpClient, ToolCallResult};
+use redagent_scope::{extract_targets, PolicyRule, Scope, ScopeDecision};
 use serde_json::Value;
 
 pub const DEFAULT_REDHANDS_VERSION: &str = "v0.6.3";
@@ -53,6 +55,16 @@ pub struct Config {
     pub approval_mode: ApprovalMode,
     /// When true, successful findings are retested by re-running the same tool.
     pub retest: bool,
+    /// Declared engagement scope. `None` (or an empty scope) means "no scope
+    /// declared".
+    pub scope: Option<Scope>,
+    /// Ordered policy rules layered on top of the guard allowlist.
+    pub rules: Vec<PolicyRule>,
+    /// Dotted JSON paths in each intent's arguments that hold scope targets.
+    pub target_paths: Vec<String>,
+    /// Fail closed when no scope was declared. Defaults to `false` so existing
+    /// (unscoped) configurations keep working.
+    pub require_declared_scope: bool,
 }
 
 impl Config {
@@ -70,6 +82,10 @@ impl Config {
             llm: None,
             approval_mode: ApprovalMode::Deny,
             retest: false,
+            scope: None,
+            rules: Vec::new(),
+            target_paths: Vec::new(),
+            require_declared_scope: false,
         }
     }
 
@@ -111,6 +127,31 @@ impl Config {
         tools: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
         self.allowed_tools = tools.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Declare the engagement scope checked before every tool call.
+    pub fn with_scope(mut self, scope: Scope) -> Self {
+        self.scope = Some(scope);
+        self
+    }
+
+    /// Install ordered policy rules (first match wins) for the composed guard.
+    pub fn with_rules(mut self, rules: impl IntoIterator<Item = PolicyRule>) -> Self {
+        self.rules = rules.into_iter().collect();
+        self
+    }
+
+    /// Set the dotted paths in intent arguments that hold scope targets.
+    pub fn with_target_paths(mut self, paths: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.target_paths = paths.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Require an explicit, non-empty scope. When enabled, an undeclared scope
+    /// denies every intent before the tool is called.
+    pub fn with_required_scope(mut self, required: bool) -> Self {
+        self.require_declared_scope = required;
         self
     }
 }
@@ -271,11 +312,23 @@ pub fn run_with<V: Verifier, A: ApprovalHandler + ?Sized>(
     run_with_executor(config, verifier, approvals, &mut executor)
 }
 
+#[tracing::instrument(level = "info", skip_all)]
 pub fn run_with_executor<V: Verifier, A: ApprovalHandler + ?Sized, E: ToolExecutor>(
     config: &Config,
     verifier: &V,
     approvals: &A,
     executor: &mut E,
+) -> Result<EngagementView> {
+    let planner = make_planner(config)?;
+    run_with_planner(config, verifier, approvals, executor, planner.as_ref())
+}
+
+fn run_with_planner<V: Verifier, A: ApprovalHandler + ?Sized, E: ToolExecutor>(
+    config: &Config,
+    verifier: &V,
+    approvals: &A,
+    executor: &mut E,
+    planner: &dyn Planner,
 ) -> Result<EngagementView> {
     let ledger = Ledger::open(&config.ledger_path)?;
     ledger.append(&EventBody::EngagementStarted {
@@ -291,7 +344,9 @@ pub fn run_with_executor<V: Verifier, A: ApprovalHandler + ?Sized, E: ToolExecut
     let evidence =
         EvidenceStore::new(ledger_dir.join("evidence_blobs")).context("opening evidence store")?;
 
-    let result = execute(config, &ledger, &evidence, executor, verifier, approvals);
+    let result = execute(
+        config, &ledger, &evidence, executor, verifier, approvals, planner,
+    );
     if let Err(error) = &result {
         ledger.append(&EventBody::EngagementAborted {
             reason: error.to_string(),
@@ -332,6 +387,64 @@ fn effective_allowlist(config: &Config, available: &[ToolDescriptor]) -> Vec<Str
     }
 }
 
+/// Risk flags surfaced on an approval proposal. Derived from the tool's
+/// advertised policy and from any scope-parsing findings.
+fn proposal_risk_flags(descriptor: Option<&ToolDescriptor>, scope_verdict: &str) -> Vec<String> {
+    let mut flags = Vec::new();
+    match descriptor {
+        None => flags.push("tool_not_in_catalog".to_string()),
+        Some(tool) => {
+            if !tool.read_only {
+                flags.push("not_read_only".to_string());
+            }
+            if tool.requires_approval {
+                flags.push("requires_approval".to_string());
+            }
+        }
+    }
+    match scope_verdict {
+        "out_of_scope" => flags.push("out_of_scope_target".to_string()),
+        "unresolvable" => flags.push("unresolvable_target".to_string()),
+        _ => {}
+    }
+    flags
+}
+
+/// Produce a simple line-based diff between two pretty-printed argument blobs.
+/// Returns `None` when there is no previous call or when nothing changed.
+pub fn diff_arguments(previous: Option<&str>, current: &str) -> Option<String> {
+    let previous = previous?;
+    if previous == current {
+        return None;
+    }
+    let old_lines: Vec<&str> = previous.lines().collect();
+    let new_lines: Vec<&str> = current.lines().collect();
+    let mut out = String::new();
+    for index in 0..old_lines.len().max(new_lines.len()) {
+        let old = old_lines.get(index).copied();
+        let new = new_lines.get(index).copied();
+        if old == new {
+            continue;
+        }
+        if let Some(line) = old {
+            out.push_str("- ");
+            out.push_str(line);
+            out.push('\n');
+        }
+        if let Some(line) = new {
+            out.push_str("+ ");
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+#[tracing::instrument(level = "info", skip_all)]
 fn execute<V: Verifier, A: ApprovalHandler + ?Sized, E: ToolExecutor>(
     config: &Config,
     ledger: &Ledger,
@@ -339,10 +452,10 @@ fn execute<V: Verifier, A: ApprovalHandler + ?Sized, E: ToolExecutor>(
     executor: &mut E,
     verifier: &V,
     approvals: &A,
+    planner: &dyn Planner,
 ) -> Result<()> {
     executor.initialize().context("MCP initialize failed")?;
     let available = executor.list_tools().context("tools/list failed")?;
-    let planner = make_planner(config)?;
     let intents = planner.plan(&config.goal, &available)?;
     let policy = Policy::new(
         effective_allowlist(config, &available),
@@ -352,6 +465,8 @@ fn execute<V: Verifier, A: ApprovalHandler + ?Sized, E: ToolExecutor>(
     // A retest is a real tool call and consumes the guard budget, so this is a
     // running count of calls rather than the index of the current intent.
     let mut calls_made = 0usize;
+    // Pretty-printed arguments of the last call to each tool, used for diffs.
+    let mut last_args: HashMap<String, String> = HashMap::new();
 
     for intent in &intents {
         ledger.append(&EventBody::IntentCreated {
@@ -361,52 +476,170 @@ fn execute<V: Verifier, A: ApprovalHandler + ?Sized, E: ToolExecutor>(
             arguments: intent.arguments.clone(),
         })?;
 
-        let decision = policy.check(&intent.tool, calls_made);
+        // 1. Scope enforcement runs before the guard and before any tool call.
+        let declared_scope = config.scope.as_ref().filter(|scope| !scope.is_empty());
+        if config.require_declared_scope && declared_scope.is_none() {
+            let reason = "a declared scope is required but none was provided".to_string();
+            ledger.append(&EventBody::ScopeDenied {
+                intent_id: intent.id.clone(),
+                tool: intent.tool.clone(),
+                reason: reason.clone(),
+            })?;
+            return Err(anyhow!("intent '{}' denied by scope: {reason}", intent.id));
+        }
+
+        let targets = extract_targets(&intent.arguments, &config.target_paths);
+        let mut in_scope = true;
+        let mut scope_verdict = "not_declared".to_string();
+        if let Some(scope) = declared_scope {
+            scope_verdict = "in_scope".to_string();
+            let mut denials = Vec::new();
+            for target in &targets {
+                match scope.allows_target(target) {
+                    ScopeDecision::InScope => {}
+                    ScopeDecision::OutOfScope { reason } => {
+                        in_scope = false;
+                        if scope_verdict == "in_scope" {
+                            scope_verdict = "out_of_scope".to_string();
+                        }
+                        denials.push(format!("target '{target}' is out of scope: {reason}"));
+                    }
+                    ScopeDecision::Unresolvable { reason } => {
+                        in_scope = false;
+                        scope_verdict = "unresolvable".to_string();
+                        denials.push(format!("target '{target}' is unresolvable: {reason}"));
+                    }
+                }
+            }
+            if !denials.is_empty() {
+                for reason in &denials {
+                    ledger.append(&EventBody::ScopeDenied {
+                        intent_id: intent.id.clone(),
+                        tool: intent.tool.clone(),
+                        reason: reason.clone(),
+                    })?;
+                }
+                return Err(anyhow!(
+                    "intent '{}' denied by scope: {}",
+                    intent.id,
+                    denials.join("; ")
+                ));
+            }
+        }
+
+        // 2. Compose the guard decision (allowlist, budget, scope and rules).
+        let descriptor = available.iter().find(|tool| tool.name == intent.tool);
+        let read_only = descriptor.is_some_and(|tool| tool.read_only);
+        let guard_verdict = evaluate_call(
+            &policy,
+            &config.rules,
+            &CallContext {
+                tool: &intent.tool,
+                args: &intent.arguments,
+                read_only,
+                in_scope,
+                calls_made,
+            },
+        );
         ledger.append(&EventBody::GuardDecision {
             intent_id: intent.id.clone(),
-            allowed: decision.allowed,
-            reason: decision.reason.clone(),
+            allowed: guard_verdict.effect != GuardEffect::Deny,
+            reason: guard_verdict.reason.clone(),
         })?;
-        if !decision.allowed {
-            if decision.reason.contains("budget") {
+
+        // 3. A deny is a security boundary, recorded as a scope denial too.
+        if guard_verdict.effect == GuardEffect::Deny {
+            if guard_verdict.reason.contains("budget") {
                 ledger.append(&EventBody::BudgetExhausted {
-                    reason: decision.reason.clone(),
+                    reason: guard_verdict.reason.clone(),
                 })?;
             }
-            return Err(anyhow!("guard denied '{}': {}", intent.id, decision.reason));
+            ledger.append(&EventBody::ScopeDenied {
+                intent_id: intent.id.clone(),
+                tool: intent.tool.clone(),
+                reason: guard_verdict.reason.clone(),
+            })?;
+            return Err(anyhow!(
+                "guard denied '{}': {}",
+                intent.id,
+                guard_verdict.reason
+            ));
         }
         calls_made += 1;
 
-        let mut call = executor.call(&intent.tool, intent.arguments.clone())?;
-        if call.result_type.as_deref() == Some("input_required") {
-            let request_id = call
-                .input_requests
-                .as_ref()
-                .and_then(|value| value.pointer("/approval/requestId"))
-                .and_then(Value::as_str)
-                .unwrap_or("unknown")
-                .to_string();
-            let message = call
-                .input_requests
-                .as_ref()
-                .and_then(|value| value.pointer("/approval/message"))
-                .and_then(Value::as_str)
-                .unwrap_or("operator approval required")
-                .to_string();
+        // Build the proposal once; it is attached to every approval event for
+        // this call and shows exactly what is about to run.
+        let pretty_args = serde_json::to_string_pretty(&intent.arguments)
+            .unwrap_or_else(|_| intent.arguments.to_string());
+        let diff = diff_arguments(
+            last_args.get(&intent.tool).map(String::as_str),
+            &pretty_args,
+        );
+        last_args.insert(intent.tool.clone(), pretty_args.clone());
+        let proposal = CallProposal {
+            tool: intent.tool.clone(),
+            arguments: pretty_args,
+            scope_verdict: scope_verdict.clone(),
+            risk_flags: proposal_risk_flags(descriptor, &scope_verdict),
+            diff,
+        };
+
+        // 4. An auto-approve rule skips operator elicitation but still runs the
+        // call, recording the decision against the rule that made it.
+        let auto_approved_by = match &guard_verdict.effect {
+            GuardEffect::AutoApprove { rule_id } => Some(rule_id.clone()),
+            _ => None,
+        };
+        if let Some(rule_id) = &auto_approved_by {
             ledger.append(&EventBody::ApprovalRequested {
                 intent_id: intent.id.clone(),
                 tool: intent.tool.clone(),
-                request_id,
+                request_id: format!("rule:{rule_id}"),
+                proposal: Some(proposal.clone()),
             })?;
-            let (approved, decided_by) = approvals.decide(&intent.id, &intent.tool, &message)?;
             ledger.append(&EventBody::ApprovalDecisionRecorded {
                 intent_id: intent.id.clone(),
-                approved,
-                decided_by,
+                approved: true,
+                decided_by: format!("rule:{rule_id}"),
             })?;
-            if !approved {
-                return Err(anyhow!("approval denied for '{}'", intent.id));
+        }
+
+        let mut call = executor.call(&intent.tool, intent.arguments.clone())?;
+        if call.result_type.as_deref() == Some("input_required") {
+            if auto_approved_by.is_none() {
+                let request_id = call
+                    .input_requests
+                    .as_ref()
+                    .and_then(|value| value.pointer("/approval/requestId"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string();
+                let message = call
+                    .input_requests
+                    .as_ref()
+                    .and_then(|value| value.pointer("/approval/message"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("operator approval required")
+                    .to_string();
+                ledger.append(&EventBody::ApprovalRequested {
+                    intent_id: intent.id.clone(),
+                    tool: intent.tool.clone(),
+                    request_id,
+                    proposal: Some(proposal.clone()),
+                })?;
+                let (approved, decided_by) =
+                    approvals.decide(&intent.id, &intent.tool, &message)?;
+                ledger.append(&EventBody::ApprovalDecisionRecorded {
+                    intent_id: intent.id.clone(),
+                    approved,
+                    decided_by,
+                })?;
+                if !approved {
+                    return Err(anyhow!("approval denied for '{}'", intent.id));
+                }
             }
+            // Auto-approved calls grant the tool's own elicitation without
+            // asking the operator; either way the re-issued call is made.
             call = executor.call_with_responses(
                 &intent.tool,
                 intent.arguments.clone(),
@@ -572,6 +805,7 @@ pub fn report_markdown(ledger_path: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
     use std::path::PathBuf;
     use tempfile::tempdir;
 
@@ -1025,5 +1259,318 @@ mod tests {
         assert!(view.tool_calls[1]
             .content
             .contains("requires operator approval"));
+    }
+
+    // --- scope / proposal integration tests ----------------------------
+
+    struct ScriptedPlanner(Vec<Intent>);
+
+    impl Planner for ScriptedPlanner {
+        fn plan(&self, _goal: &str, _available: &[ToolDescriptor]) -> Result<Vec<Intent>> {
+            Ok(self.0.clone())
+        }
+    }
+
+    fn intent(id: &str, tool: &str, arguments: Value) -> Intent {
+        Intent {
+            id: id.to_string(),
+            title: format!("{tool} probe"),
+            tool: tool.to_string(),
+            arguments,
+            rationale: "test intent".to_string(),
+        }
+    }
+
+    fn run_with_intents<V, A, E>(
+        intents: Vec<Intent>,
+        config: &Config,
+        verifier: &V,
+        approvals: &A,
+        executor: &mut E,
+    ) -> Result<EngagementView>
+    where
+        V: Verifier,
+        A: ApprovalHandler + ?Sized,
+        E: ToolExecutor,
+    {
+        run_with_planner(
+            config,
+            verifier,
+            approvals,
+            executor,
+            &ScriptedPlanner(intents),
+        )
+    }
+
+    fn ledger_events(config: &Config) -> Vec<redagent_core::StoredEvent> {
+        Ledger::open(&config.ledger_path).unwrap().events().unwrap()
+    }
+
+    #[test]
+    fn diff_arguments_handles_none_equal_and_changed() {
+        assert_eq!(diff_arguments(None, "{\"a\":1}"), None);
+        assert_eq!(diff_arguments(Some("{\"a\":1}"), "{\"a\":1}"), None);
+        let diff = diff_arguments(Some("{\n  \"a\": 1\n}"), "{\n  \"a\": 2\n}").unwrap();
+        assert!(diff.contains("-   \"a\": 1"), "{diff}");
+        assert!(diff.contains("+   \"a\": 2"), "{diff}");
+    }
+
+    #[test]
+    fn diff_arguments_reports_added_and_removed_lines() {
+        let diff = diff_arguments(Some("{\n  \"a\": 1\n}"), "{\n  \"b\": 2\n}").unwrap();
+        assert!(diff.lines().any(|line| line.starts_with("- ")));
+        assert!(diff.lines().any(|line| line.starts_with("+ ")));
+        assert_eq!(diff_arguments(Some("a\nb"), "a\nb\nc").unwrap(), "+ c\n");
+    }
+
+    #[test]
+    fn out_of_scope_target_aborts_before_executor_is_called() {
+        let dir = tempdir().unwrap();
+        let scope = Scope::new(vec!["10.0.0.0/8".into()], vec![], vec![]).unwrap();
+        let config = Config::new(
+            "scan",
+            PathBuf::from("unused"),
+            dir.path().join("out-of-scope.db"),
+        )
+        .with_scope(scope)
+        .with_target_paths(["target"]);
+        let mut executor = MockExecutor {
+            calls: Vec::new(),
+            gate: false,
+        };
+        let result = run_with_intents(
+            vec![intent(
+                "intent-1",
+                "redhands_health",
+                serde_json::json!({"target": "192.168.1.10"}),
+            )],
+            &config,
+            &HeuristicVerifier,
+            &DenyAll,
+            &mut executor,
+        );
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("scope"), "{error:#}");
+        assert!(executor.calls.is_empty(), "the tool must never be called");
+
+        let events = ledger_events(&config);
+        assert!(events.iter().any(|event| matches!(
+            &event.body,
+            EventBody::ScopeDenied { intent_id, tool, reason }
+                if intent_id == "intent-1"
+                    && tool == "redhands_health"
+                    && reason.contains("192.168.1.10")
+        )));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event.body, EventBody::ToolCallCompleted { .. })));
+        let view = load_view(&config.ledger_path).unwrap();
+        assert_eq!(view.scope_denials.len(), 1);
+        assert_eq!(view.scope_denials[0].intent_id, "intent-1");
+    }
+
+    #[test]
+    fn required_scope_denies_when_no_scope_is_declared() {
+        let dir = tempdir().unwrap();
+        let config = Config::new(
+            "scan",
+            PathBuf::from("unused"),
+            dir.path().join("required-scope.db"),
+        )
+        .with_required_scope(true);
+        let mut executor = MockExecutor {
+            calls: Vec::new(),
+            gate: false,
+        };
+        let result = run_with_intents(
+            vec![intent("intent-1", "redhands_health", serde_json::json!({}))],
+            &config,
+            &HeuristicVerifier,
+            &DenyAll,
+            &mut executor,
+        );
+        assert!(result.is_err());
+        assert!(executor.calls.is_empty());
+        assert!(ledger_events(&config).iter().any(|event| matches!(
+            &event.body,
+            EventBody::ScopeDenied { reason, .. } if reason.contains("declared scope")
+        )));
+    }
+
+    /// Tracks whether the operator was asked to approve anything.
+    struct NoCallApprovals(Cell<usize>);
+
+    impl ApprovalHandler for NoCallApprovals {
+        fn decide(&self, _intent_id: &str, _tool: &str, _message: &str) -> Result<(bool, String)> {
+            self.0.set(self.0.get() + 1);
+            Ok((true, "operator".to_string()))
+        }
+    }
+
+    #[test]
+    fn auto_approval_rule_bypasses_elicitation_and_records_rule_decided_by() {
+        let dir = tempdir().unwrap();
+        let rule: PolicyRule = serde_json::from_value(serde_json::json!({
+            "id": "auto-scan",
+            "tool_pattern": "redhands_*",
+            "effect": "AutoApprove"
+        }))
+        .unwrap();
+        let config = Config::new(
+            "scan",
+            PathBuf::from("unused"),
+            dir.path().join("auto-approval.db"),
+        )
+        .with_rules([rule]);
+        let mut executor = MockExecutor {
+            calls: Vec::new(),
+            gate: true,
+        };
+        let approvals = NoCallApprovals(Cell::new(0));
+        let view = run_with_intents(
+            vec![intent("intent-1", "redhands_health", serde_json::json!({}))],
+            &config,
+            &HeuristicVerifier,
+            &approvals,
+            &mut executor,
+        )
+        .unwrap();
+
+        assert_eq!(approvals.0.get(), 0, "operator must not be elicited");
+        assert!(view.completed);
+        assert_eq!(view.approvals.len(), 1);
+        assert_eq!(view.approvals[0].approved, Some(true));
+        assert_eq!(view.approvals[0].decided_by, "rule:auto-scan");
+        // The gated tool is still executed and its elicitation auto-granted.
+        assert_eq!(executor.calls.len(), 2);
+        assert!(view.tool_calls[0].content.contains("Status: OK"));
+        assert!(ledger_events(&config).iter().any(|event| matches!(
+            &event.body,
+            EventBody::ApprovalRequested { proposal: Some(p), .. }
+                if p.tool == "redhands_health"
+        )));
+    }
+
+    /// Same shape as `MockExecutor`, but advertises a write-capable,
+    /// approval-gated tool so proposals carry meaningful risk flags.
+    struct RiskyExecutor(MockExecutor);
+
+    impl ToolExecutor for RiskyExecutor {
+        fn initialize(&mut self) -> Result<String> {
+            self.0.initialize()
+        }
+        fn list_tools(&mut self) -> Result<Vec<ToolDescriptor>> {
+            Ok(vec![ToolDescriptor::new(
+                "redhands_health",
+                "health",
+                serde_json::json!({"type": "object"}),
+            )
+            .with_policy(false, true)])
+        }
+        fn call_with_responses(
+            &mut self,
+            tool: &str,
+            arguments: Value,
+            input_responses: Option<Value>,
+        ) -> Result<ToolCallResult> {
+            self.0.call_with_responses(tool, arguments, input_responses)
+        }
+    }
+
+    #[test]
+    fn require_approval_proposal_has_risk_flags_and_a_diff_on_repeat_calls() {
+        let dir = tempdir().unwrap();
+        let rule: PolicyRule = serde_json::from_value(serde_json::json!({
+            "id": "require-human",
+            "tool_pattern": "redhands_*",
+            "effect": "RequireApproval"
+        }))
+        .unwrap();
+        let config = Config::new(
+            "scan",
+            PathBuf::from("unused"),
+            dir.path().join("require-approval.db"),
+        )
+        .with_rules([rule]);
+        let mut executor = RiskyExecutor(MockExecutor {
+            calls: Vec::new(),
+            gate: true,
+        });
+        let view = run_with_intents(
+            vec![
+                intent(
+                    "intent-1",
+                    "redhands_health",
+                    serde_json::json!({"target": "10.0.0.1"}),
+                ),
+                intent(
+                    "intent-2",
+                    "redhands_health",
+                    serde_json::json!({"target": "10.0.0.2"}),
+                ),
+            ],
+            &config,
+            &HeuristicVerifier,
+            &ApproveAll,
+            &mut executor,
+        )
+        .unwrap();
+
+        assert!(view.completed);
+        assert_eq!(view.approvals.len(), 2);
+        let events = ledger_events(&config);
+        let proposals: Vec<&CallProposal> = events
+            .iter()
+            .filter_map(|event| match &event.body {
+                EventBody::ApprovalRequested {
+                    proposal: Some(proposal),
+                    ..
+                } => Some(proposal),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(proposals.len(), 2);
+        for proposal in &proposals {
+            assert!(proposal.risk_flags.contains(&"not_read_only".to_string()));
+            assert!(proposal
+                .risk_flags
+                .contains(&"requires_approval".to_string()));
+            assert_eq!(proposal.scope_verdict, "not_declared");
+            assert!(proposal.arguments.contains("\"target\""));
+        }
+        assert!(proposals[0].diff.is_none());
+        let diff = proposals[1].diff.as_ref().expect("second call has a diff");
+        assert!(diff.contains("10.0.0.1"), "{diff}");
+        assert!(diff.contains("10.0.0.2"), "{diff}");
+        assert!(diff.contains("- "), "{diff}");
+        assert!(diff.contains("+ "), "{diff}");
+    }
+
+    #[test]
+    fn guard_denial_records_scope_denied_and_aborts() {
+        let dir = tempdir().unwrap();
+        let config = Config::new(
+            "scan",
+            PathBuf::from("unused"),
+            dir.path().join("guard-denial.db"),
+        )
+        .with_allowed_tools(["some_other_tool"]);
+        let mut executor = MockExecutor {
+            calls: Vec::new(),
+            gate: false,
+        };
+        let result = run_with_intents(
+            vec![intent("intent-1", "redhands_health", serde_json::json!({}))],
+            &config,
+            &HeuristicVerifier,
+            &DenyAll,
+            &mut executor,
+        );
+        assert!(result.is_err());
+        assert!(executor.calls.is_empty());
+        assert!(ledger_events(&config).iter().any(|event| matches!(
+            &event.body,
+            EventBody::ScopeDenied { reason, .. } if reason.contains("allowlist")
+        )));
     }
 }
