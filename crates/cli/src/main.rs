@@ -1,11 +1,18 @@
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
+use chrono::Utc;
 use clap::{Parser, Subcommand};
 use redagent_app::{report_markdown, run, Config, LlmConfig};
 use redagent_core::Ledger;
 use redagent_scope::{PolicyRule, Scope};
-use serde::Deserialize;
+use redagent_signing::{Checkpoint, SigningKey};
+use serde::{Deserialize, Serialize};
+
+/// Repeated wherever signing keys or anchors are created: signatures only
+/// detect tampering while the key and a trusted anchor live outside the ledger.
+const INDEPENDENT_KEY_WARNING: &str = "WARNING: store the signing key independently of the ledger it signs, and publish anchors independently too. Anyone who can edit the ledger and read the key can simply recompute the head hash and re-sign, defeating tamper detection.";
 
 #[derive(Debug, Deserialize)]
 struct ScopeConfig {
@@ -97,6 +104,11 @@ enum Command {
         /// Disable tool-output injection signal detection.
         #[arg(long)]
         no_injection_guard: bool,
+        /// Ed25519 signing key file; enables signed ledger checkpoints.
+        #[arg(long)]
+        signing_key: Option<PathBuf>,
+        #[arg(long, default_value_t = 50)]
+        checkpoint_interval: usize,
     },
     /// Export an engagement as SARIF, CycloneDX, MITRE Navigator or Markdown.
     Export {
@@ -116,6 +128,15 @@ enum Command {
     Verify {
         #[arg(long, default_value = "redagent.db")]
         ledger: PathBuf,
+        /// Verify ed25519 signed checkpoints as well as the hash chain.
+        #[arg(long)]
+        signatures: bool,
+        /// Public key hex (from `keygen`) required with --signatures.
+        #[arg(long)]
+        public_key: Option<String>,
+        /// Independently stored anchor file to check against the ledger head.
+        #[arg(long)]
+        anchor: Option<PathBuf>,
     },
     /// Start the REST/SSE control API for the desktop UI.
     Serve {
@@ -129,6 +150,38 @@ enum Command {
         redhands: PathBuf,
         #[arg(long, default_value_t = 300)]
         approval_timeout_secs: u64,
+    },
+    /// Generate a new ed25519 signing key.
+    ///
+    /// WARNING: the generated key must be stored independently of the ledger
+    /// it signs. Anyone who can edit the ledger and read this key can
+    /// recompute the head hash and re-sign, defeating tamper detection.
+    Keygen {
+        /// Path to write the signing key JSON file to (parent dirs are created).
+        #[arg(long)]
+        output: PathBuf,
+        /// Replace an existing file at --output.
+        #[arg(long)]
+        overwrite: bool,
+    },
+    /// Sign the current ledger head into a portable anchor file.
+    ///
+    /// WARNING: the signing key must be stored independently of the ledger it
+    /// signs, and the resulting anchor published independently too. Otherwise
+    /// an attacker who can edit the ledger can roll it back together with the
+    /// anchor and present a shorter, internally consistent history.
+    Anchor {
+        #[arg(long, default_value = "redagent.db")]
+        ledger: PathBuf,
+        /// Path to the Ed25519 signing key JSON file created by `keygen`.
+        #[arg(long)]
+        key: PathBuf,
+        /// Path to write the signed checkpoint (pretty JSON) to.
+        #[arg(long)]
+        output: PathBuf,
+        /// Replace an existing file at --output.
+        #[arg(long)]
+        overwrite: bool,
     },
 }
 
@@ -158,6 +211,79 @@ fn resolve_llm_config(
     })
 }
 
+/// Generate a fresh Ed25519 signing key and persist it at `output`.
+///
+/// An existing file is only replaced when `overwrite` is true. Never prints
+/// secret key material: only the public key hex and short key id are reported.
+pub fn keygen(output: &Path, overwrite: bool) -> Result<SigningKey> {
+    let key = SigningKey::generate().context("generating signing key")?;
+    key.to_file(output, overwrite)?;
+
+    println!("signing key written to {}", output.display());
+    println!("public key: {}", key.public_hex());
+    println!("key id:     {}", key.key_id());
+    eprintln!("{INDEPENDENT_KEY_WARNING}");
+
+    Ok(key)
+}
+
+/// Sign the current head of `ledger` with `key` and write the resulting
+/// checkpoint as pretty JSON to `output`.
+///
+/// The last stored event is used as the head (this branch has no checkpoint
+/// event kind to skip). An empty ledger is rejected. An existing `output` is
+/// only replaced when `overwrite` is true.
+pub fn anchor(
+    ledger_path: &Path,
+    key_path: &Path,
+    output: &Path,
+    overwrite: bool,
+) -> Result<Checkpoint> {
+    let key = SigningKey::from_file(key_path)?;
+    let ledger = Ledger::open(ledger_path)?;
+    let events = ledger.events()?;
+    let head = events
+        .last()
+        .ok_or_else(|| anyhow!("cannot anchor an empty ledger: {}", ledger_path.display()))?;
+
+    let ts = Utc::now().to_rfc3339();
+    let checkpoint = key.sign(head.seq, &head.hash, &ts)?;
+    write_json_pretty(output, &checkpoint, overwrite)?;
+
+    println!("wrote anchor to {}", output.display());
+    println!("key id: {}", checkpoint.key_id);
+    eprintln!("{INDEPENDENT_KEY_WARNING}");
+
+    Ok(checkpoint)
+}
+
+/// Serialize `value` as pretty JSON at `path`, creating parent directories and
+/// refusing to replace an existing file unless `overwrite` is true.
+fn write_json_pretty<T: Serialize>(path: &Path, value: &T, overwrite: bool) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating anchor directory {}", parent.display()))?;
+        }
+    }
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true);
+    if overwrite {
+        options.create(true).truncate(true);
+    } else {
+        options.create_new(true);
+    }
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("opening anchor file {}", path.display()))?;
+    serde_json::to_writer_pretty(&mut file, value)
+        .with_context(|| format!("writing anchor JSON to {}", path.display()))?;
+    file.flush()
+        .with_context(|| format!("flushing anchor file {}", path.display()))?;
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
@@ -178,13 +304,21 @@ fn main() -> Result<()> {
             scope_file,
             require_scope,
             no_injection_guard,
+            signing_key,
+            checkpoint_interval,
         } => {
             let mut config = Config::new(goal, redhands, ledger.clone())
                 .with_limits(max_tool_calls, max_intents)
                 .with_retest(retest)
                 .with_toolsets(toolsets)
                 .with_required_scope(require_scope)
-                .with_injection_guard(!no_injection_guard);
+                .with_injection_guard(!no_injection_guard)
+                .with_checkpoint_interval(checkpoint_interval);
+            if let Some(path) = signing_key {
+                config = config
+                    .with_signing_key(SigningKey::from_file(&path).context("loading signing key")?);
+                eprintln!("{INDEPENDENT_KEY_WARNING}");
+            }
             config = apply_scope_file(config, scope_file.as_ref())?;
             if allow_read_only {
                 config = config.with_allowed_tools(Vec::<String>::new());
@@ -222,9 +356,43 @@ fn main() -> Result<()> {
             }
         }
         Command::Report { ledger } => print!("{}", report_markdown(&ledger)?),
-        Command::Verify { ledger } => {
-            let count = Ledger::open(&ledger)?.verify_chain()?;
+        Command::Verify {
+            ledger,
+            signatures,
+            public_key,
+            anchor,
+        } => {
+            let ledger = Ledger::open(&ledger)?;
+            let events = ledger.events()?;
+            let count = ledger.verify_chain()?;
             println!("OK: {count} events, hash chain verified");
+            if signatures {
+                let key = public_key.clone().ok_or_else(|| {
+                    anyhow::anyhow!("--signatures requires --public-key <hex> from `keygen`")
+                })?;
+                let valid = redagent_core::verify_signed_checkpoints(&events, &key)?;
+                println!("OK: {valid} signed checkpoints verified");
+            }
+            if let Some(path) = anchor {
+                let checkpoint: Checkpoint = serde_json::from_str(&std::fs::read_to_string(&path)?)
+                    .context("parsing anchor file")?;
+                let event = events
+                    .iter()
+                    .find(|event| event.seq == checkpoint.seq)
+                    .ok_or_else(|| anyhow::anyhow!("anchor seq not found in ledger"))?;
+                if event.hash != checkpoint.head_hash {
+                    bail!(
+                        "anchor head hash does not match ledger event {}",
+                        checkpoint.seq
+                    );
+                }
+                let key = public_key
+                    .ok_or_else(|| anyhow::anyhow!("--anchor requires --public-key <hex>"))?;
+                if !redagent_signing::verify(&checkpoint, &key)? {
+                    bail!("anchor signature is invalid");
+                }
+                println!("OK: anchor at seq {} matches the ledger", checkpoint.seq);
+            }
         }
         Command::Serve {
             bind,
@@ -242,6 +410,144 @@ fn main() -> Result<()> {
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(redagent_api::serve(config))?;
         }
+        Command::Keygen { output, overwrite } => {
+            keygen(&output, overwrite)?;
+        }
+        Command::Anchor {
+            ledger,
+            key,
+            output,
+            overwrite,
+        } => {
+            anchor(&ledger, &key, &output, overwrite)?;
+        }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use redagent_core::EventBody;
+    use redagent_signing::verify;
+
+    use super::*;
+
+    fn temp_dir() -> tempfile::TempDir {
+        tempfile::tempdir().expect("create temp directory")
+    }
+
+    /// Create a ledger with a single event so it has a non-empty head.
+    fn ledger_with_event(dir: &Path) -> PathBuf {
+        let path = dir.join("ledger.db");
+        let ledger = Ledger::open(&path).expect("open ledger");
+        ledger
+            .append(&EventBody::EngagementStarted {
+                goal: "anchor test".to_owned(),
+                redhands_version: "0.4.0".to_owned(),
+            })
+            .expect("append event");
+        path
+    }
+
+    #[test]
+    fn keygen_writes_key_and_round_trips() {
+        let dir = temp_dir();
+        let path = dir.path().join("nested").join("signing-key.json");
+        let key = keygen(&path, false).expect("keygen should create the key");
+        assert!(path.is_file(), "key file must exist, including parent dirs");
+
+        let loaded = SigningKey::from_file(&path).expect("reload the key file");
+        assert_eq!(loaded.public_hex(), key.public_hex());
+        assert_eq!(loaded.key_id(), key.key_id());
+    }
+
+    #[test]
+    fn keygen_refuses_overwrite_unless_requested() {
+        let dir = temp_dir();
+        let path = dir.path().join("signing-key.json");
+        let first = keygen(&path, false).expect("first keygen");
+
+        assert!(
+            keygen(&path, false).is_err(),
+            "second keygen must refuse to overwrite"
+        );
+        let still_first = SigningKey::from_file(&path).expect("reload original key");
+        assert_eq!(still_first.public_hex(), first.public_hex());
+
+        let second = keygen(&path, true).expect("keygen with --overwrite");
+        let reloaded = SigningKey::from_file(&path).expect("reload overwritten key");
+        assert_eq!(reloaded.public_hex(), second.public_hex());
+    }
+
+    #[test]
+    fn anchor_rejects_empty_ledger() {
+        let dir = temp_dir();
+        let ledger_path = dir.path().join("empty.db");
+        Ledger::open(&ledger_path).expect("create empty ledger");
+        let key_path = dir.path().join("key.json");
+        keygen(&key_path, false).expect("keygen");
+        let output = dir.path().join("anchor.json");
+
+        let error = anchor(&ledger_path, &key_path, &output, false)
+            .expect_err("anchoring an empty ledger must fail");
+        assert!(error.to_string().contains("empty ledger"));
+        assert!(!output.exists(), "no anchor file should be written");
+    }
+
+    #[test]
+    fn anchor_writes_valid_json_with_matching_head_and_key_id() {
+        let dir = temp_dir();
+        let ledger_path = ledger_with_event(dir.path());
+        let key_path = dir.path().join("key.json");
+        let key = keygen(&key_path, false).expect("keygen");
+        let head = Ledger::open(&ledger_path)
+            .expect("open ledger")
+            .events()
+            .expect("read events")
+            .pop()
+            .expect("ledger has one event");
+        let output = dir.path().join("nested").join("anchor.json");
+
+        let checkpoint = anchor(&ledger_path, &key_path, &output, false).expect("anchor");
+        let text = fs::read_to_string(&output).expect("read anchor file");
+        assert!(text.contains('\n'), "anchor JSON should be pretty printed");
+        let parsed: Checkpoint = serde_json::from_str(&text).expect("parse anchor JSON");
+
+        assert_eq!(parsed, checkpoint);
+        assert_eq!(checkpoint.seq, head.seq);
+        assert_eq!(checkpoint.head_hash, head.hash);
+        assert_eq!(checkpoint.key_id, key.key_id());
+        assert!(verify(&checkpoint, &key.public_hex()).expect("signature verification"));
+    }
+
+    #[test]
+    fn anchor_respects_overwrite() {
+        let dir = temp_dir();
+        let ledger_path = ledger_with_event(dir.path());
+        let key_path = dir.path().join("key.json");
+        keygen(&key_path, false).expect("keygen");
+        let output = dir.path().join("anchor.json");
+
+        let first = anchor(&ledger_path, &key_path, &output, false).expect("first anchor");
+        assert!(
+            anchor(&ledger_path, &key_path, &output, false).is_err(),
+            "second anchor must refuse to overwrite"
+        );
+
+        // Appending an event changes the head, so the rewritten anchor differs.
+        let ledger = Ledger::open(&ledger_path).expect("open ledger");
+        ledger
+            .append(&EventBody::EngagementCompleted { findings: 0 })
+            .expect("append second event");
+        drop(ledger);
+
+        let second = anchor(&ledger_path, &key_path, &output, true).expect("overwrite anchor");
+        assert_ne!(second.seq, first.seq);
+        let parsed: Checkpoint =
+            serde_json::from_str(&fs::read_to_string(&output).expect("read rewritten anchor"))
+                .expect("parse rewritten anchor");
+        assert_eq!(parsed, second);
+    }
 }

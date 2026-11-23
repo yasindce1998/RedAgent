@@ -18,6 +18,7 @@ ignore = [
     { id = "RUSTSEC-2026-0371", reason = "zbus/zvariant desktop IPC transitive, not exposed to targets", expiry = "2027-06-01" },
     { id = "RUSTSEC-2026-0372", reason = "zbus/zvariant desktop IPC transitive, not exposed to targets", expiry = "2027-06-01" },
     { id = "RUSTSEC-2026-0543", reason = "chrono: timestamp parsing only, no attacker-controlled input", expiry = "2027-06-01" },
+    { id = "RUSTSEC-2026-0592", reason = "url: RedAgent parses no nested blob: URLs; patched version pending upstream", expiry = "2027-06-01" },
 ]
 
 [licenses]

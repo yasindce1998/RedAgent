@@ -33,7 +33,7 @@ RedHands exposes capabilities. RedAgent decides **what to try next**, remembers 
 | 🖥️ **Native + web control room** | Dioxus desktop and WASM web UIs share components; an Axum REST/SSE API streams projections and routes approvals — no Node, no database server. |
 | ⚡ **Two planes, one protocol** | Go stays where it shines (the tool plane); Rust owns the control plane and the native UI. One protocol between them: MCP. |
 
-> **Status:** v0.4.0 — trust release. Scope enforcement, structured approval proposals, injection signals and tracing are live; the event ledger remains append-only and backward compatible.
+> **Status:** v0.4.1 — signed evidence. Ed25519 checkpoints and portable anchors complement the scope guard, structured approvals and hash-chained ledger.
 
 ## How it works
 
@@ -80,6 +80,21 @@ Gated RedHands tools return an inline `input_required` result. By default RedAge
 ```
 
 `--auto-approve` prints a loud warning and records `decided_by: auto-approve` in the ledger for every approval. Approval grants last exactly one tool call, matching RedHands' contract.
+
+### Signed evidence (v0.4.1)
+
+```sh
+redagent keygen --output signer.json
+redagent run "signed engagement" --signing-key signer.json \
+  --checkpoint-interval 50 --redhands /path/to/redhands --ledger signed.db
+redagent anchor --ledger signed.db --key signer.json --output anchor.json
+redagent verify --ledger signed.db --signatures \
+  --public-key <hex-from-keygen> --anchor anchor.json
+```
+
+Checkpoints sign the chain head every N events; an anchor is a portable signed
+statement of the head at a point in time. **Store the key and anchors
+independently of the ledger** — otherwise a rewrite can simply be re-signed.
 
 ### Scope and rules (v0.4.0)
 

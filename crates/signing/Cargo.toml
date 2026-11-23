@@ -1,0 +1,22 @@
+[package]
+name = "redagent-signing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+ed25519-dalek = "2"
+rand_core = { version = "0.6", features = ["getrandom"] }
+
+# The UI is compiled to wasm32 and pulls core -> signing -> rand_core.
+# getrandom needs its JS backend there; this is a no-op on native targets.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+
+[dev-dependencies]
+tempfile.workspace = true

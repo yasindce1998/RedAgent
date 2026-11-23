@@ -1,26 +1,18 @@
-# RedAgent v0.3.1
+# RedAgent v0.4.1
 
-Hardening release — 14 bugs fixed with regression tests, verified against the
-real RedHands tool plane.
+Signed evidence — ed25519 checkpoints and portable anchors for the event ledger.
 
-## Highlights
+- **`redagent keygen`** generates a signing key with an independent-storage warning and 0600 file permissions
+- **Automatic checkpoints**: `redagent run --signing-key <file> --checkpoint-interval N` signs the chain head every N events; checkpoints are ledger events and appear in reports
+- **`redagent anchor`** writes a portable signed checkpoint of the current ledger head
+- **`redagent verify --signatures --public-key <hex> [--anchor <file>]`** verifies every checkpoint against its ledger event and validates the external anchor
+- Ledger remains backward compatible: old ledgers verify without checkpoints and new event fields use serde defaults
 
-- **Security**: API keys are redacted from every LLM error path; export filenames and API ids cannot inject headers or escape the ledger directory
-- **Ledger integrity**: hashes are verified against the stored payload bytes; future/unknown event kinds no longer break older readers; evidence blobs are integrity-checked on read
-- **Agent correctness**: retest verdicts no longer claim `fixed` for findings that never verified; planner validates rationale, required arguments, duplicates and untrusted data framing
-- **Real chaining**: `--toolsets nmap,vuln` and `--allow-read-only` expose the live catalog with RedHands policy metadata so LLM plans can use more than `redhands_health`
-- **Control room**: approval decision races, SSE leaks on deleted ledgers, stale UI responses and unsafe URL construction fixed
-- **Exports**: MITRE technique word boundaries, SARIF rule dedup and collision-free CycloneDX serials
-
-## Verification
-
-- 123 workspace tests, fmt, clippy `-D warnings`, native release build and WASM target check all green
-- Old v0.3.0 ledgers still verify with the hardened binary
-- Live run against checksum-pinned RedHands v0.6.3 with retest and non-default toolsets; exports and API validation checks passed
+Security note: a hash chain plus signatures only protects against ledger rewriting when the signing key and anchor are stored independently of the ledger. See `THREAT_MODEL.md`.
 
 Contract version: **RedHands v0.6.3**. MIT licensed. Authorized engagements only.
 
 ```sh
 sha256sum -c SHA256SUMS
-./redagent_0.3.1/redagent --version   # redagent 0.3.1
+./redagent_0.4.1/redagent --version   # redagent 0.4.1
 ```

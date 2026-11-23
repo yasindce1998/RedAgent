@@ -83,6 +83,16 @@ pub struct PlanRejectionView {
     pub attempt: u32,
 }
 
+/// A signed checkpoint over a ledger event's sequence number and hash.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckpointView {
+    pub seq: i64,
+    pub head_hash: String,
+    pub key_id: String,
+    pub signature: String,
+    pub ts: String,
+}
+
 /// Read-only view over the ledger. Rebuilt from events on demand.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct EngagementView {
@@ -98,6 +108,7 @@ pub struct EngagementView {
     pub scope_denials: Vec<ScopeDenialView>,
     pub injection_signals: Vec<InjectionSignalView>,
     pub plan_rejections: Vec<PlanRejectionView>,
+    pub checkpoints: Vec<CheckpointView>,
     pub budget_exhausted: Option<String>,
     pub completed: bool,
     pub abort_reason: Option<String>,
@@ -258,6 +269,15 @@ pub fn project(events: &[StoredEvent]) -> EngagementView {
                 view.plan_rejections.push(PlanRejectionView {
                     reason: reason.clone(),
                     attempt: *attempt,
+                });
+            }
+            EventBody::CheckpointSigned { checkpoint } => {
+                view.checkpoints.push(CheckpointView {
+                    seq: checkpoint.seq,
+                    head_hash: checkpoint.head_hash.clone(),
+                    key_id: checkpoint.key_id.clone(),
+                    signature: checkpoint.signature.clone(),
+                    ts: checkpoint.ts.clone(),
                 });
             }
             EventBody::BudgetExhausted { reason } => {
@@ -423,6 +443,23 @@ pub fn render_markdown(view: &EngagementView) -> String {
             out.push_str(&format!(
                 "- **Attempt {}:** {}\n",
                 rejection.attempt, rejection.reason
+            ));
+        }
+        out.push('\n');
+    }
+
+    if !view.checkpoints.is_empty() {
+        out.push_str("## Signed checkpoints\n\n");
+        out.push_str("| Ledger seq | Head hash | Key ID | Signature | Signed at |\n");
+        out.push_str("|---|---|---|---|---|\n");
+        for checkpoint in &view.checkpoints {
+            out.push_str(&format!(
+                "| {} | {} | {} | {} | {} |\n",
+                checkpoint.seq,
+                checkpoint.head_hash,
+                checkpoint.key_id,
+                checkpoint.signature,
+                checkpoint.ts
             ));
         }
         out.push('\n');
@@ -662,6 +699,7 @@ mod tests {
         assert!(!md.contains("## Verification"));
         assert!(!md.contains("## Evidence"));
         assert!(!md.contains("## Retests"));
+        assert!(!md.contains("## Signed checkpoints"));
         assert!(!md.contains("Budget exhausted"));
     }
 
@@ -928,6 +966,7 @@ mod tests {
         assert!(!md.contains("## Scope denials"));
         assert!(!md.contains("## Injection signals"));
         assert!(!md.contains("## Plan rejections"));
+        assert!(!md.contains("## Signed checkpoints"));
     }
 
     #[test]
@@ -946,5 +985,38 @@ mod tests {
         let first = md.find("**Attempt 1:** first").unwrap();
         let second = md.find("**Attempt 2:** second").unwrap();
         assert!(first < second);
+    }
+
+    #[test]
+    fn signed_checkpoints_are_projected_and_rendered() {
+        let checkpoint = redagent_signing::Checkpoint {
+            seq: 4,
+            head_hash: "ab".repeat(32),
+            key_id: "cd".repeat(8),
+            signature: "ef".repeat(64),
+            ts: "2026-01-01T00:00:00Z".into(),
+        };
+        let view = project(&[event(EventBody::CheckpointSigned {
+            checkpoint: checkpoint.clone(),
+        })]);
+
+        assert_eq!(view.checkpoints.len(), 1);
+        let projected = &view.checkpoints[0];
+        assert_eq!(projected.seq, checkpoint.seq);
+        assert_eq!(projected.head_hash, checkpoint.head_hash);
+        assert_eq!(projected.key_id, checkpoint.key_id);
+        assert_eq!(projected.signature, checkpoint.signature);
+        assert_eq!(projected.ts, checkpoint.ts);
+
+        let md = render_markdown(&view);
+        assert!(md.contains("## Signed checkpoints"));
+        assert!(md.contains("| Ledger seq | Head hash | Key ID | Signature | Signed at |"));
+        assert!(md.contains(&format!(
+            "| 4 | {} | {} | {} | 2026-01-01T00:00:00Z |",
+            checkpoint.head_hash, checkpoint.key_id, checkpoint.signature
+        )));
+        // Checkpoints are inert with respect to the rest of the report.
+        assert!(!view.completed);
+        assert!(view.intents.is_empty());
     }
 }
