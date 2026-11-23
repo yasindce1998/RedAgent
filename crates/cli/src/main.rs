@@ -115,6 +115,12 @@ enum Command {
         signing_key: Option<PathBuf>,
         #[arg(long, default_value_t = 50)]
         checkpoint_interval: usize,
+        /// Extra replan attempts after a rejected plan (memory + failures).
+        #[arg(long, default_value_t = 1)]
+        replan_attempts: usize,
+        /// Hard cap on total LLM tokens for this engagement.
+        #[arg(long)]
+        max_llm_tokens: Option<u64>,
     },
     /// Verify any MCP tool server against a RedAgent adapter manifest
     Conformance {
@@ -349,6 +355,7 @@ fn main() -> Result<()> {
             tracing_subscriber::EnvFilter::try_from_env("REDAGENT_LOG")
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
         )
+        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
         .with_writer(std::io::stderr)
         .try_init();
     let cli = Cli::parse();
@@ -373,6 +380,8 @@ fn main() -> Result<()> {
             no_injection_guard,
             signing_key,
             checkpoint_interval,
+            replan_attempts,
+            max_llm_tokens,
         } => {
             let mut config = Config::new(goal, redhands, ledger.clone())
                 .with_limits(max_tool_calls, max_intents)
@@ -380,7 +389,11 @@ fn main() -> Result<()> {
                 .with_toolsets(toolsets)
                 .with_required_scope(require_scope)
                 .with_injection_guard(!no_injection_guard)
-                .with_checkpoint_interval(checkpoint_interval);
+                .with_checkpoint_interval(checkpoint_interval)
+                .with_replan_attempts(replan_attempts);
+            if let Some(limit) = max_llm_tokens {
+                config = config.with_token_budget(limit);
+            }
             if let Some(path) = manifest {
                 config =
                     config

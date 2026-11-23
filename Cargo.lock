@@ -5286,7 +5286,7 @@ dependencies = [
 
 [[package]]
 name = "redagent-agent"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "redagent-llm",
@@ -5296,7 +5296,7 @@ dependencies = [
 
 [[package]]
 name = "redagent-api"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -5315,7 +5315,7 @@ dependencies = [
 
 [[package]]
 name = "redagent-app"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5336,7 +5336,7 @@ dependencies = [
 
 [[package]]
 name = "redagent-cli"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5358,7 +5358,7 @@ dependencies = [
 
 [[package]]
 name = "redagent-conformance"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "redagent-contract",
@@ -5368,7 +5368,7 @@ dependencies = [
 
 [[package]]
 name = "redagent-contract"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -5378,7 +5378,7 @@ dependencies = [
 
 [[package]]
 name = "redagent-core"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5392,7 +5392,7 @@ dependencies = [
 
 [[package]]
 name = "redagent-evidence"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "hex",
@@ -5402,7 +5402,7 @@ dependencies = [
 
 [[package]]
 name = "redagent-export"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "hex",
@@ -5413,7 +5413,7 @@ dependencies = [
 
 [[package]]
 name = "redagent-guard"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "redagent-scope",
  "serde_json",
@@ -5421,7 +5421,7 @@ dependencies = [
 
 [[package]]
 name = "redagent-llm"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "reqwest",
@@ -5431,7 +5431,7 @@ dependencies = [
 
 [[package]]
 name = "redagent-mcp"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "redagent-contract",
@@ -5442,7 +5442,7 @@ dependencies = [
 
 [[package]]
 name = "redagent-memory"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "redagent-core",
  "serde",
@@ -5451,7 +5451,7 @@ dependencies = [
 
 [[package]]
 name = "redagent-scope"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "ipnet",
@@ -5462,7 +5462,7 @@ dependencies = [
 
 [[package]]
 name = "redagent-signing"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "ed25519-dalek",
@@ -5476,7 +5476,7 @@ dependencies = [
 
 [[package]]
 name = "redagent-ui"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "dioxus",
  "gloo-timers",
