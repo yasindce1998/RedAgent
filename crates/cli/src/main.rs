@@ -104,6 +104,11 @@ enum Command {
         /// Disable tool-output injection signal detection.
         #[arg(long)]
         no_injection_guard: bool,
+        /// Ed25519 signing key file; enables signed ledger checkpoints.
+        #[arg(long)]
+        signing_key: Option<PathBuf>,
+        #[arg(long, default_value_t = 50)]
+        checkpoint_interval: usize,
     },
     /// Export an engagement as SARIF, CycloneDX, MITRE Navigator or Markdown.
     Export {
@@ -123,6 +128,15 @@ enum Command {
     Verify {
         #[arg(long, default_value = "redagent.db")]
         ledger: PathBuf,
+        /// Verify ed25519 signed checkpoints as well as the hash chain.
+        #[arg(long)]
+        signatures: bool,
+        /// Public key hex (from `keygen`) required with --signatures.
+        #[arg(long)]
+        public_key: Option<String>,
+        /// Independently stored anchor file to check against the ledger head.
+        #[arg(long)]
+        anchor: Option<PathBuf>,
     },
     /// Start the REST/SSE control API for the desktop UI.
     Serve {
@@ -290,13 +304,21 @@ fn main() -> Result<()> {
             scope_file,
             require_scope,
             no_injection_guard,
+            signing_key,
+            checkpoint_interval,
         } => {
             let mut config = Config::new(goal, redhands, ledger.clone())
                 .with_limits(max_tool_calls, max_intents)
                 .with_retest(retest)
                 .with_toolsets(toolsets)
                 .with_required_scope(require_scope)
-                .with_injection_guard(!no_injection_guard);
+                .with_injection_guard(!no_injection_guard)
+                .with_checkpoint_interval(checkpoint_interval);
+            if let Some(path) = signing_key {
+                config = config
+                    .with_signing_key(SigningKey::from_file(&path).context("loading signing key")?);
+                eprintln!("{INDEPENDENT_KEY_WARNING}");
+            }
             config = apply_scope_file(config, scope_file.as_ref())?;
             if allow_read_only {
                 config = config.with_allowed_tools(Vec::<String>::new());
@@ -334,9 +356,43 @@ fn main() -> Result<()> {
             }
         }
         Command::Report { ledger } => print!("{}", report_markdown(&ledger)?),
-        Command::Verify { ledger } => {
-            let count = Ledger::open(&ledger)?.verify_chain()?;
+        Command::Verify {
+            ledger,
+            signatures,
+            public_key,
+            anchor,
+        } => {
+            let ledger = Ledger::open(&ledger)?;
+            let events = ledger.events()?;
+            let count = ledger.verify_chain()?;
             println!("OK: {count} events, hash chain verified");
+            if signatures {
+                let key = public_key.clone().ok_or_else(|| {
+                    anyhow::anyhow!("--signatures requires --public-key <hex> from `keygen`")
+                })?;
+                let valid = redagent_core::verify_signed_checkpoints(&events, &key)?;
+                println!("OK: {valid} signed checkpoints verified");
+            }
+            if let Some(path) = anchor {
+                let checkpoint: Checkpoint = serde_json::from_str(&std::fs::read_to_string(&path)?)
+                    .context("parsing anchor file")?;
+                let event = events
+                    .iter()
+                    .find(|event| event.seq == checkpoint.seq)
+                    .ok_or_else(|| anyhow::anyhow!("anchor seq not found in ledger"))?;
+                if event.hash != checkpoint.head_hash {
+                    bail!(
+                        "anchor head hash does not match ledger event {}",
+                        checkpoint.seq
+                    );
+                }
+                let key = public_key
+                    .ok_or_else(|| anyhow::anyhow!("--anchor requires --public-key <hex>"))?;
+                if !redagent_signing::verify(&checkpoint, &key)? {
+                    bail!("anchor signature is invalid");
+                }
+                println!("OK: anchor at seq {} matches the ledger", checkpoint.seq);
+            }
         }
         Command::Serve {
             bind,
