@@ -5,7 +5,7 @@ use std::net::{TcpListener, TcpStream};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use redagent_llm::LlmClient;
+use redagent_llm::{Completion, LlmClient, Usage};
 use serde_json::{json, Value};
 
 struct Request {
@@ -297,4 +297,78 @@ fn malformed_responses_are_errors() {
         assert!(error.contains(expected), "{body} -> {error}");
         handle.join().unwrap();
     }
+}
+
+/// Build a minimal successful completion payload, optionally with a `usage`
+/// object (a `Value::Null` is passed through to test null handling too).
+fn completion_body(usage: Option<Value>) -> String {
+    let mut body = json!({"choices":[{"message":{"content":"{\"ok\":true}"}}]});
+    if let Some(usage) = usage {
+        body["usage"] = usage;
+    }
+    body.to_string()
+}
+
+#[test]
+fn complete_json_with_usage_parses_full_usage() {
+    let body = completion_body(Some(json!({
+        "prompt_tokens": 10,
+        "completion_tokens": 20,
+        "total_tokens": 30,
+    })));
+    let (base_url, handle) = spawn_server(move |_| response("200 OK", &body));
+    let client = LlmClient::new(&base_url, "test-key", "test-model");
+    let completion: Completion = client.complete_json_with_usage("s", "u").unwrap();
+    assert_eq!(completion.content, "{\"ok\":true}");
+    assert_eq!(
+        completion.usage,
+        Some(Usage {
+            prompt_tokens: 10,
+            completion_tokens: 20,
+            total_tokens: 30,
+        })
+    );
+    handle.join().unwrap();
+}
+
+#[test]
+fn complete_json_with_usage_defaults_missing_fields_to_zero() {
+    let body = completion_body(Some(json!({"prompt_tokens": 7})));
+    let (base_url, handle) = spawn_server(move |_| response("200 OK", &body));
+    let client = LlmClient::new(&base_url, "test-key", "test-model");
+    let completion = client.complete_json_with_usage("s", "u").unwrap();
+    assert_eq!(
+        completion.usage,
+        Some(Usage {
+            prompt_tokens: 7,
+            completion_tokens: 0,
+            total_tokens: 0,
+        })
+    );
+    handle.join().unwrap();
+}
+
+#[test]
+fn complete_json_with_usage_handles_absent_and_null_usage() {
+    for usage in [None, Some(Value::Null)] {
+        let body = completion_body(usage.clone());
+        let (base_url, handle) = spawn_server(move |_| response("200 OK", &body));
+        let client = LlmClient::new(&base_url, "test-key", "test-model");
+        let completion = client.complete_json_with_usage("s", "u").unwrap();
+        assert_eq!(completion.usage, None, "usage payload: {usage:?}");
+        handle.join().unwrap();
+    }
+}
+
+#[test]
+fn complete_json_returns_only_content_even_when_usage_is_present() {
+    let body = completion_body(Some(json!({
+        "prompt_tokens": 1,
+        "completion_tokens": 2,
+        "total_tokens": 3,
+    })));
+    let (base_url, handle) = spawn_server(move |_| response("200 OK", &body));
+    let client = LlmClient::new(&base_url, "test-key", "test-model");
+    assert_eq!(client.complete_json("s", "u").unwrap(), "{\"ok\":true}");
+    handle.join().unwrap();
 }

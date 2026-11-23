@@ -2,6 +2,8 @@
 //! mode is implemented: [`LlmClient::complete_json`]
 //! asks the model for a `json_object` response and returns the raw content
 //! string, which [`extract_json_object`] can turn into a [`serde_json::Value`].
+//! [`LlmClient::complete_json_with_usage`] returns the same content together
+//! with the optional token-usage counters reported by the endpoint.
 
 use std::fmt;
 use std::time::Duration;
@@ -13,6 +15,28 @@ use serde_json::Value;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_ERROR_BODY_CHARS: usize = 512;
+
+/// Token usage reported alongside a chat completion.
+///
+/// Every counter defaults to `0` when the endpoint omits (or does not report)
+/// it, so callers can accumulate usage without special-casing partial payloads.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Usage {
+    #[serde(default)]
+    pub prompt_tokens: u64,
+    #[serde(default)]
+    pub completion_tokens: u64,
+    #[serde(default)]
+    pub total_tokens: u64,
+}
+
+/// The content of a completion plus the optional usage counters supplied by
+/// the endpoint. `usage` is `None` when the response carries no usage object.
+#[derive(Debug, Clone)]
+pub struct Completion {
+    pub content: String,
+    pub usage: Option<Usage>,
+}
 
 /// A synchronous, blocking client for `/chat/completions`.
 ///
@@ -69,16 +93,30 @@ impl LlmClient {
     /// can never be echoed, even when a misconfigured base URL or a gateway
     /// response happens to contain it.
     pub fn complete_json(&self, system: &str, user: &str) -> Result<String> {
-        self.complete_json_inner(system, user).map_err(|err| {
-            let rendered = format!("{err:#}");
-            if self.api_key.is_empty() || !rendered.contains(&self.api_key) {
-                return err;
-            }
-            anyhow!("{}", rendered.replace(&self.api_key, "[REDACTED]"))
-        })
+        self.complete_json_with_usage(system, user)
+            .map(|completion| completion.content)
     }
 
-    fn complete_json_inner(&self, system: &str, user: &str) -> Result<String> {
+    /// Send a two-message chat completion request in JSON mode and return the
+    /// raw `choices[0].message.content` together with any token usage the
+    /// endpoint reports.
+    ///
+    /// Usage counters are optional and independently default to `0`; a
+    /// response without a `usage` object yields `Completion { usage: None }`.
+    /// All parsing/error/redaction behaviour is identical to
+    /// [`Self::complete_json`].
+    pub fn complete_json_with_usage(&self, system: &str, user: &str) -> Result<Completion> {
+        self.complete_json_with_usage_inner(system, user)
+            .map_err(|err| {
+                let rendered = format!("{err:#}");
+                if self.api_key.is_empty() || !rendered.contains(&self.api_key) {
+                    return err;
+                }
+                anyhow!("{}", rendered.replace(&self.api_key, "[REDACTED]"))
+            })
+    }
+
+    fn complete_json_with_usage_inner(&self, system: &str, user: &str) -> Result<Completion> {
         let endpoint = chat_completions_url(&self.base_url)?;
         let payload = ChatRequest {
             model: &self.model,
@@ -119,6 +157,7 @@ impl LlmClient {
         let parsed: ChatResponse = response
             .json()
             .context("LLM response body was not valid JSON")?;
+        let usage = parsed.usage;
         let content = parsed
             .choices
             .into_iter()
@@ -129,7 +168,7 @@ impl LlmClient {
         if content.trim().is_empty() {
             return Err(anyhow!("LLM response message content was empty"));
         }
-        Ok(content)
+        Ok(Completion { content, usage })
     }
 }
 
@@ -155,6 +194,9 @@ struct ResponseFormat {
 #[derive(Deserialize)]
 struct ChatResponse {
     choices: Vec<Choice>,
+    /// Usage is optional; missing (or `null`) means no counters were reported.
+    #[serde(default)]
+    usage: Option<Usage>,
 }
 
 #[derive(Deserialize)]

@@ -5429,6 +5429,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "redagent-memory"
+version = "0.3.1"
+dependencies = [
+ "redagent-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "redagent-scope"
 version = "0.5.1"
 dependencies = [
