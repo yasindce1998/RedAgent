@@ -1,18 +1,16 @@
-# RedAgent v0.4.1
+# RedAgent v0.5.0
 
-Signed evidence — ed25519 checkpoints and portable anchors for the event ledger.
+Auditor-grade reporting on top of the signed, scope-enforced evidence chain.
 
-- **`redagent keygen`** generates a signing key with an independent-storage warning and 0600 file permissions
-- **Automatic checkpoints**: `redagent run --signing-key <file> --checkpoint-interval N` signs the chain head every N events; checkpoints are ledger events and appear in reports
-- **`redagent anchor`** writes a portable signed checkpoint of the current ledger head
-- **`redagent verify --signatures --public-key <hex> [--anchor <file>]`** verifies every checkpoint against its ledger event and validates the external anchor
-- Ledger remains backward compatible: old ledgers verify without checkpoints and new event fields use serde defaults
-
-Security note: a hash chain plus signatures only protects against ledger rewriting when the signing key and anchor are stored independently of the ledger. See `THREAT_MODEL.md`.
+- **HTML export** — self-contained branded dossier with inline CSS, responsive layout, findings/verification/evidence sections and MITRE technique chips; every untrusted string is HTML-escaped
+- **Retest diff** — `redagent retest --against baseline.db --ledger current.db` reports fixed / still-open / new findings in Markdown or JSON
+- **MITRE Navigator layer** — now driven by `T####` IDs extracted from finding titles and tool output
+- **SARIF 2.1.0 / CycloneDX 1.5** gains from the earlier hardening pass remain available
+- API exports accept `html`; the Dioxus UI exposes an HTML export card
 
 Contract version: **RedHands v0.6.3**. MIT licensed. Authorized engagements only.
 
 ```sh
 sha256sum -c SHA256SUMS
-./redagent_0.4.1/redagent --version   # redagent 0.4.1
+./redagent_0.5.0/redagent --version   # redagent 0.5.0
 ```

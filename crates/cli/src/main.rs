@@ -119,6 +119,19 @@ enum Command {
         #[arg(long)]
         output: Option<PathBuf>,
     },
+    /// Compare two engagement ledgers: fixed, still-open and new findings.
+    Retest {
+        /// The current (new) engagement ledger.
+        #[arg(long, default_value = "redagent.db")]
+        ledger: PathBuf,
+        /// The baseline ledger to compare against.
+        #[arg(long)]
+        against: PathBuf,
+        #[arg(long, default_value = "markdown")]
+        format: String,
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
     /// Render a ledger as a Markdown report.
     Report {
         #[arg(long, default_value = "redagent.db")]
@@ -347,6 +360,28 @@ fn main() -> Result<()> {
             let view = redagent_app::load_view(&ledger)?;
             let format: redagent_export::ExportFormat = format.parse()?;
             let content = redagent_export::export(&view, format)?;
+            match output {
+                Some(path) => {
+                    std::fs::write(&path, content)?;
+                    println!("wrote {}", path.display());
+                }
+                None => print!("{content}"),
+            }
+        }
+        Command::Retest {
+            ledger,
+            against,
+            format,
+            output,
+        } => {
+            let old = redagent_app::load_view(&against)?;
+            let new = redagent_app::load_view(&ledger)?;
+            let format = match format.to_ascii_lowercase().as_str() {
+                "markdown" | "md" => redagent_export::DiffFormat::Markdown,
+                "json" => redagent_export::DiffFormat::Json,
+                other => bail!("unsupported diff format '{other}' (expected markdown or json)"),
+            };
+            let content = redagent_export::diff_retest(&old, &new, format)?;
             match output {
                 Some(path) => {
                     std::fs::write(&path, content)?;

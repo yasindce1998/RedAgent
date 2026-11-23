@@ -33,7 +33,7 @@ RedHands exposes capabilities. RedAgent decides **what to try next**, remembers 
 | 🖥️ **Native + web control room** | Dioxus desktop and WASM web UIs share components; an Axum REST/SSE API streams projections and routes approvals — no Node, no database server. |
 | ⚡ **Two planes, one protocol** | Go stays where it shines (the tool plane); Rust owns the control plane and the native UI. One protocol between them: MCP. |
 
-> **Status:** v0.4.1 — signed evidence. Ed25519 checkpoints and portable anchors complement the scope guard, structured approvals and hash-chained ledger.
+> **Status:** v0.5.0 — auditor-grade reporting. SARIF, CycloneDX, MITRE Navigator, branded HTML and a fixed/still-open/new retest diff, on top of signed evidence and the trust boundary.
 
 ## How it works
 
@@ -128,6 +128,13 @@ The engine spawns RedHands over stdio with a minimal toolset and redirects every
 ```
 
 Tool outputs are stored as SHA-256 blobs under `evidence_blobs/` next to the ledger and referenced by hash in the audit trail. Retests record `still_reproducible`, `fixed` or `cannot_confirm` verdicts.
+
+Export formats: `sarif` (2.1.0), `cyclonedx` (1.5), `mitre` (ATT&CK Navigator layer), `markdown`, and `html` (self-contained branded dossier). Compare two engagements with:
+
+```sh
+redagent retest --against baseline.db --ledger current.db --format markdown
+redagent retest --against baseline.db --ledger current.db --format json
+```
 
 ### Control room (Phase 2)
 

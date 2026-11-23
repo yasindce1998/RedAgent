@@ -15,16 +15,16 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            asset: redagent_0.4.1_linux_amd64.tar.gz
+            asset: redagent_0.5.0_linux_amd64.tar.gz
           - os: macos-latest
             target: x86_64-apple-darwin
-            asset: redagent_0.4.1_darwin_amd64.tar.gz
+            asset: redagent_0.5.0_darwin_amd64.tar.gz
           - os: macos-latest
             target: aarch64-apple-darwin
-            asset: redagent_0.4.1_darwin_arm64.tar.gz
+            asset: redagent_0.5.0_darwin_arm64.tar.gz
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            asset: redagent_0.4.1_windows_amd64.zip
+            asset: redagent_0.5.0_windows_amd64.zip
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -37,18 +37,18 @@ jobs:
       - name: Package (Unix)
         if: runner.os != 'Windows'
         run: |
-          mkdir -p dist/redagent_0.4.1
-          cp target/${{ matrix.target }}/release/redagent dist/redagent_0.4.1/
-          cp LICENSE README.md dist/redagent_0.4.1/
-          tar czf ${{ matrix.asset }} -C dist redagent_0.4.1
+          mkdir -p dist/redagent_0.5.0
+          cp target/${{ matrix.target }}/release/redagent dist/redagent_0.5.0/
+          cp LICENSE README.md dist/redagent_0.5.0/
+          tar czf ${{ matrix.asset }} -C dist redagent_0.5.0
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force dist/redagent_0.4.1 | Out-Null
-          Copy-Item target/${{ matrix.target }}/release/redagent.exe dist/redagent_0.4.1/
-          Copy-Item LICENSE, README.md dist/redagent_0.4.1/
-          Compress-Archive -Path dist/redagent_0.4.1 -DestinationPath ${{ matrix.asset }}
+          New-Item -ItemType Directory -Force dist/redagent_0.5.0 | Out-Null
+          Copy-Item target/${{ matrix.target }}/release/redagent.exe dist/redagent_0.5.0/
+          Copy-Item LICENSE, README.md dist/redagent_0.5.0/
+          Compress-Archive -Path dist/redagent_0.5.0 -DestinationPath ${{ matrix.asset }}
       - name: Upload asset
         uses: actions/upload-artifact@v4
         with:
@@ -76,6 +76,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create "$GITHUB_REF_NAME" dist/* \
-            --title "RedAgent v0.4.1" \
+            --title "RedAgent v0.5.0" \
             --notes-file RELEASE_NOTES.md \
             --verify-tag

@@ -674,6 +674,7 @@ fn export_panel(export_base: Option<&str>) -> Element {
         ("CycloneDX", "SBOM / vulnerability BOM", "cyclonedx"),
         ("MITRE", "ATT&CK Navigator layer", "mitre"),
         ("Markdown", "Human-readable dossier", "markdown"),
+        ("HTML", "Branded standalone report", "html"),
     ];
     rsx! {
         section { style: CARD_STYLE,
