@@ -75,6 +75,13 @@ pub struct RunRequest {
     pub require_declared_scope: bool,
     #[serde(default = "default_true")]
     pub injection_guard: bool,
+    #[serde(default = "default_replan_attempts")]
+    pub replan_attempts: usize,
+    pub max_llm_tokens: Option<u64>,
+}
+
+fn default_replan_attempts() -> usize {
+    1
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -517,7 +524,12 @@ async fn create_engagement(
     .with_toolsets(&request.toolsets)
     .with_required_scope(request.require_declared_scope)
     .with_injection_guard(request.injection_guard)
-    .with_target_paths(request.target_paths.clone());
+    .with_target_paths(request.target_paths.clone())
+    .with_replan_attempts(request.replan_attempts);
+    let config = match request.max_llm_tokens {
+        Some(limit) => config.with_token_budget(limit),
+        None => config,
+    };
     let config = match request.scope {
         Some(scope) => config
             .with_scope(
@@ -598,6 +610,14 @@ pub fn router(state: AppState) -> Router {
 
 /// Bind the configured address and serve until the process is shut down.
 pub async fn serve(config: ApiConfig) -> anyhow::Result<()> {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_env("REDAGENT_LOG")
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
+        .with_writer(std::io::stderr)
+        .try_init();
     let bind = config.bind;
     let app = router(AppState::new(config));
     let listener = tokio::net::TcpListener::bind(bind).await?;

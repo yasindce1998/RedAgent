@@ -88,4 +88,15 @@ guard allowlist/budget, CLI (`run` / `report` / `verify`) and CI.
   WASM binary; platform-specific sleeps are isolated behind a single helper.
   The browser talks only to the Axum API — no direct ledger access.
 
-RBAC/KMS, OpenTelemetry and optional WASM plugins remain later phases.
+## Phase 5 decisions
+
+- **Backtracking**: failed plans are recorded as `PlanRejected` events with
+  failure context; the planner is retried with a structured memory projection
+  (targets, coverage, open findings, redacted credentials) and the failure
+  list, instead of aborting on the first failed approach.
+- **Token budgets** are checked from the LLM response `usage` alongside tool-call
+  budgets; overruns become ledger events before any tool is executed.
+- **Observability** uses `tracing` spans in the engine and a subscriber in the
+  CLI/API configured by `REDAGENT_LOG`; no separate collector is required.
+
+RBAC/KMS and optional WASM plugins remain later work.

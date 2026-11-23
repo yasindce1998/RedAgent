@@ -110,6 +110,10 @@ pub struct EngagementView {
     pub plan_rejections: Vec<PlanRejectionView>,
     pub checkpoints: Vec<CheckpointView>,
     pub budget_exhausted: Option<String>,
+    /// `(used, limit)` from the most recent `TokenBudgetExhausted` event.
+    /// Defaults to `None` when reading a view written by an older version.
+    #[serde(default)]
+    pub token_budget: Option<(u64, u64)>,
     pub completed: bool,
     pub abort_reason: Option<String>,
 }
@@ -283,6 +287,9 @@ pub fn project(events: &[StoredEvent]) -> EngagementView {
             EventBody::BudgetExhausted { reason } => {
                 view.budget_exhausted = Some(reason.clone());
             }
+            EventBody::TokenBudgetExhausted { used, limit } => {
+                view.token_budget = Some((*used, *limit));
+            }
             EventBody::EngagementCompleted { .. } => view.completed = true,
             EventBody::EngagementAborted { reason } => view.abort_reason = Some(reason.clone()),
             // Future event kinds are preserved in the ledger but have no
@@ -310,6 +317,11 @@ pub fn render_markdown(view: &EngagementView) -> String {
     ));
     if let Some(reason) = &view.budget_exhausted {
         out.push_str(&format!("- **Budget exhausted:** {reason}\n"));
+    }
+    if let Some((used, limit)) = view.token_budget {
+        out.push_str(&format!(
+            "- **Token budget exhausted:** {used} / {limit} tokens\n"
+        ));
     }
     out.push('\n');
 
@@ -701,6 +713,7 @@ mod tests {
         assert!(!md.contains("## Retests"));
         assert!(!md.contains("## Signed checkpoints"));
         assert!(!md.contains("Budget exhausted"));
+        assert!(!md.contains("Token budget exhausted"));
     }
 
     #[test]
@@ -1018,5 +1031,33 @@ mod tests {
         // Checkpoints are inert with respect to the rest of the report.
         assert!(!view.completed);
         assert!(view.intents.is_empty());
+    }
+
+    #[test]
+    fn token_budget_events_are_projected_and_rendered() {
+        let events = vec![
+            event(EventBody::TokenBudgetExhausted {
+                used: 900,
+                limit: 800,
+            }),
+            // A later event overwrites the counters, matching "most recent".
+            event(EventBody::TokenBudgetExhausted {
+                used: 1200,
+                limit: 1000,
+            }),
+        ];
+        let view = project(&events);
+        assert_eq!(view.token_budget, Some((1200, 1000)));
+
+        let md = render_markdown(&view);
+        assert!(md.contains("- **Token budget exhausted:** 1200 / 1000 tokens"));
+    }
+
+    #[test]
+    fn older_views_without_token_budget_still_deserialize() {
+        let mut value = serde_json::to_value(project(&[])).unwrap();
+        value.as_object_mut().unwrap().remove("token_budget");
+        let decoded: EngagementView = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.token_budget, None);
     }
 }

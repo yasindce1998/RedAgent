@@ -23,6 +23,7 @@ redagent-contract = { path = "../contract" }
 redagent-conformance = { path = "../conformance" }
 serde.workspace = true
 serde_json.workspace = true
+tracing-subscriber.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 [dev-dependencies]
