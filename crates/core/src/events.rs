@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+
+use anyhow::{anyhow, Context, Result};
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -120,6 +123,12 @@ pub enum EventBody {
         reason: String,
         attempt: u32,
     },
+    /// An Ed25519 signature binding `checkpoint.seq` and the ledger head hash
+    /// at that sequence. Checkpoints are appended after an engagement ends and
+    /// are inert with respect to all projections.
+    CheckpointSigned {
+        checkpoint: redagent_signing::Checkpoint,
+    },
     /// An event kind written by a future version of RedAgent that this reader
     /// does not recognize. `event_kind` is the original `kind` tag and `raw` is
     /// the payload as stored in the ledger. Unknown events are inert: they do
@@ -151,6 +160,7 @@ const KNOWN_KINDS: &[&str] = &[
     "scope_denied",
     "injection_signal",
     "plan_rejected",
+    "checkpoint_signed",
 ];
 
 /// Internal tag used when serializing [`EventBody::Unknown`]. Reserved so it
@@ -243,6 +253,9 @@ enum KnownEventBody {
     PlanRejected {
         reason: String,
         attempt: u32,
+    },
+    CheckpointSigned {
+        checkpoint: redagent_signing::Checkpoint,
     },
 }
 
@@ -375,6 +388,9 @@ impl From<KnownEventBody> for EventBody {
             KnownEventBody::PlanRejected { reason, attempt } => {
                 Self::PlanRejected { reason, attempt }
             }
+            KnownEventBody::CheckpointSigned { checkpoint } => {
+                Self::CheckpointSigned { checkpoint }
+            }
         }
     }
 }
@@ -457,6 +473,7 @@ impl EventBody {
             Self::ScopeDenied { .. } => "scope_denied",
             Self::InjectionSignal { .. } => "injection_signal",
             Self::PlanRejected { .. } => "plan_rejected",
+            Self::CheckpointSigned { .. } => "checkpoint_signed",
             // The original tag is preserved in `event_kind`.
             Self::Unknown { .. } => "unknown",
         }
@@ -484,9 +501,242 @@ pub struct StoredEvent {
     pub hash: String,
 }
 
+/// Verify every [`EventBody::CheckpointSigned`] event in `events`.
+///
+/// Each checkpoint is checked in two ways:
+///
+/// 1. its `seq` must identify an event in `events` whose `hash` equals the
+///    checkpoint's `head_hash` (so the signature cannot be replayed against a
+///    different ledger position);
+/// 2. its Ed25519 signature must verify under `public_hex`.
+///
+/// Returns the number of valid checkpoints. A ledger with no checkpoints is
+/// valid by definition and yields `Ok(0)`. Any invalid checkpoint is a hard
+/// error whose message names the offending sequence number.
+///
+/// Note that a valid signature alone does not anchor the ledger: the public key
+/// and at least one trusted checkpoint must come from outside the ledger (see
+/// the `redagent_signing` crate documentation).
+pub fn verify_signed_checkpoints(events: &[StoredEvent], public_hex: &str) -> Result<usize> {
+    let by_seq: HashMap<i64, &StoredEvent> =
+        events.iter().map(|event| (event.seq, event)).collect();
+    let mut verified = 0usize;
+
+    for event in events {
+        let EventBody::CheckpointSigned { checkpoint } = &event.body else {
+            continue;
+        };
+        let seq = checkpoint.seq;
+        let head = by_seq.get(&seq).ok_or_else(|| {
+            anyhow!("signed checkpoint at seq {seq} has no matching ledger event")
+        })?;
+        if head.hash != checkpoint.head_hash {
+            return Err(anyhow!(
+                "signed checkpoint at seq {seq} names head hash {}, but the ledger event has {}",
+                checkpoint.head_hash,
+                head.hash
+            ));
+        }
+        let valid = redagent_signing::verify(checkpoint, public_hex)
+            .with_context(|| format!("verifying signed checkpoint at seq {seq}"))?;
+        if !valid {
+            return Err(anyhow!(
+                "invalid signature on signed checkpoint at seq {seq}"
+            ));
+        }
+        verified += 1;
+    }
+
+    Ok(verified)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_checkpoint(seq: i64) -> redagent_signing::Checkpoint {
+        redagent_signing::Checkpoint {
+            seq,
+            head_hash: "ab".repeat(32),
+            key_id: "cd".repeat(8),
+            signature: "ef".repeat(64),
+            ts: "2026-01-01T00:00:00Z".into(),
+        }
+    }
+
+    fn signed_event(seq: i64, hash: &str, checkpoint: redagent_signing::Checkpoint) -> StoredEvent {
+        StoredEvent {
+            seq,
+            ts: "2026-01-01T00:00:00Z".into(),
+            body: EventBody::CheckpointSigned { checkpoint },
+            prev_hash: "0".repeat(64),
+            hash: hash.to_string(),
+        }
+    }
+
+    #[test]
+    fn signed_checkpoint_event_round_trips_with_all_fields() {
+        let checkpoint = test_checkpoint(7);
+        let body = EventBody::CheckpointSigned {
+            checkpoint: checkpoint.clone(),
+        };
+        assert_eq!(body.kind(), "checkpoint_signed");
+
+        let json = serde_json::to_string(&body).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["kind"], "checkpoint_signed");
+        assert_eq!(value["checkpoint"]["seq"], 7);
+        assert_eq!(value["checkpoint"]["head_hash"], checkpoint.head_hash);
+        assert_eq!(value["checkpoint"]["key_id"], checkpoint.key_id);
+        assert_eq!(value["checkpoint"]["signature"], checkpoint.signature);
+        assert_eq!(value["checkpoint"]["ts"], checkpoint.ts);
+
+        // Both the generic serde path and the ledger payload parser must
+        // reconstruct the embedded checkpoint exactly.
+        assert_eq!(serde_json::from_str::<EventBody>(&json).unwrap(), body);
+        assert_eq!(EventBody::from_payload(&json).unwrap(), body);
+    }
+
+    #[test]
+    fn verify_signed_checkpoints_accepts_valid_signatures() {
+        let key = redagent_signing::SigningKey::generate().unwrap();
+        let head_hash = "ab".repeat(32);
+        let checkpoint = key.sign(2, &head_hash, "2026-01-01T00:00:00Z").unwrap();
+        let events = vec![
+            StoredEvent {
+                seq: 1,
+                ts: "2026-01-01T00:00:00Z".into(),
+                body: EventBody::EngagementStarted {
+                    goal: "g".into(),
+                    redhands_version: "v".into(),
+                },
+                prev_hash: "0".repeat(64),
+                hash: "11".repeat(32),
+            },
+            StoredEvent {
+                seq: 2,
+                ts: "2026-01-01T00:00:00Z".into(),
+                body: EventBody::EngagementCompleted { findings: 0 },
+                prev_hash: "11".repeat(32),
+                hash: head_hash.clone(),
+            },
+            signed_event(3, &"33".repeat(32), checkpoint),
+        ];
+
+        assert_eq!(
+            verify_signed_checkpoints(&events, &key.public_hex()).unwrap(),
+            1
+        );
+        // Two valid checkpoints are both counted.
+        let mut twice = events.clone();
+        twice.push(signed_event(
+            4,
+            &"44".repeat(32),
+            key.sign(1, &"11".repeat(32), "2026-01-01T00:00:01Z")
+                .unwrap(),
+        ));
+        assert_eq!(
+            verify_signed_checkpoints(&twice, &key.public_hex()).unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn verify_signed_checkpoints_rejects_tampered_signatures() {
+        let key = redagent_signing::SigningKey::generate().unwrap();
+        let other = redagent_signing::SigningKey::generate().unwrap();
+        let head_hash = "ab".repeat(32);
+        let mut checkpoint = key.sign(2, &head_hash, "2026-01-01T00:00:00Z").unwrap();
+        let events = vec![
+            StoredEvent {
+                seq: 2,
+                ts: "2026-01-01T00:00:00Z".into(),
+                body: EventBody::EngagementCompleted { findings: 0 },
+                prev_hash: "0".repeat(64),
+                hash: head_hash.clone(),
+            },
+            signed_event(3, &"33".repeat(32), checkpoint.clone()),
+        ];
+
+        checkpoint.signature = "00".repeat(64);
+        let tampered = [
+            events[0].clone(),
+            signed_event(3, &"33".repeat(32), checkpoint),
+        ];
+        let err = verify_signed_checkpoints(&tampered, &key.public_hex())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("seq 2"), "{err}");
+
+        // A wrong public key is reported the same way.
+        let err = verify_signed_checkpoints(&events, &other.public_hex())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("seq 2"), "{err}");
+    }
+
+    #[test]
+    fn verify_signed_checkpoints_rejects_mismatched_seq_and_head_hash() {
+        let key = redagent_signing::SigningKey::generate().unwrap();
+        let head_hash = "ab".repeat(32);
+        let checkpoint = key.sign(2, &head_hash, "2026-01-01T00:00:00Z").unwrap();
+        let chain = StoredEvent {
+            seq: 2,
+            ts: "2026-01-01T00:00:00Z".into(),
+            body: EventBody::EngagementCompleted { findings: 0 },
+            prev_hash: "0".repeat(64),
+            hash: head_hash.clone(),
+        };
+
+        // The checkpoint points at a sequence that does not exist in this
+        // chain. The seq check fires before signature verification.
+        let missing = redagent_signing::Checkpoint {
+            seq: 999,
+            ..checkpoint.clone()
+        };
+        let missing_seq = [chain.clone(), signed_event(3, &"33".repeat(32), missing)];
+        let err = verify_signed_checkpoints(&missing_seq, &key.public_hex())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("seq 999"), "{err}");
+
+        // Same seq, different event hash: the checkpoint describes another
+        // ledger history.
+        let wrong_hash_chain = StoredEvent {
+            hash: "99".repeat(32),
+            ..chain.clone()
+        };
+        let wrong_hash = [
+            wrong_hash_chain,
+            signed_event(3, &"33".repeat(32), checkpoint),
+        ];
+        let err = verify_signed_checkpoints(&wrong_hash, &key.public_hex())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("seq 2"), "{err}");
+    }
+
+    #[test]
+    fn verify_signed_checkpoints_on_ledger_without_checkpoints() {
+        let events = vec![StoredEvent {
+            seq: 1,
+            ts: "2026-01-01T00:00:00Z".into(),
+            body: EventBody::EngagementStarted {
+                goal: "g".into(),
+                redhands_version: "v".into(),
+            },
+            prev_hash: "0".repeat(64),
+            hash: "11".repeat(32),
+        }];
+        assert_eq!(
+            verify_signed_checkpoints(&events, "not a public key").unwrap(),
+            0
+        );
+        assert_eq!(
+            verify_signed_checkpoints(&[], "not a public key").unwrap(),
+            0
+        );
+    }
 
     #[test]
     fn new_event_kinds_and_ledger_tags() {
@@ -645,6 +895,9 @@ mod tests {
             EventBody::PlanRejected {
                 reason: "r".into(),
                 attempt: 1,
+            },
+            EventBody::CheckpointSigned {
+                checkpoint: test_checkpoint(5),
             },
         ];
         assert_eq!(bodies.len(), KNOWN_KINDS.len());

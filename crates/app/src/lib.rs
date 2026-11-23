@@ -17,6 +17,8 @@ use redagent_scope::{extract_targets, PolicyRule, Scope, ScopeDecision};
 use serde_json::Value;
 
 pub const DEFAULT_REDHANDS_VERSION: &str = "v0.6.3";
+/// Default number of ledger events between signed checkpoints.
+pub const DEFAULT_CHECKPOINT_INTERVAL: usize = 50;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PlannerMode {
@@ -37,7 +39,8 @@ pub enum ApprovalMode {
     ApproveAll,
 }
 
-#[derive(Debug, Clone)]
+// `SigningKey` is deliberately neither `Clone` nor `Debug` (it holds secret
+// key material), so `Config` cannot derive those traits once it owns one.
 pub struct Config {
     pub goal: String,
     pub redhands_binary: PathBuf,
@@ -69,6 +72,12 @@ pub struct Config {
     pub require_declared_scope: bool,
     /// Record injection-suspicion signals found in untrusted tool output.
     pub injection_guard: bool,
+    /// Ed25519 key used to sign ledger checkpoints. `None` disables signing;
+    /// existing ledgers and configurations keep working unchanged.
+    pub signing_key: Option<redagent_signing::SigningKey>,
+    /// Sign the ledger head every N events (default 50). Zero disables
+    /// checkpointing even when a key is configured.
+    pub checkpoint_interval: usize,
 }
 
 impl Config {
@@ -91,6 +100,8 @@ impl Config {
             target_paths: Vec::new(),
             require_declared_scope: false,
             injection_guard: true,
+            signing_key: None,
+            checkpoint_interval: DEFAULT_CHECKPOINT_INTERVAL,
         }
     }
 
@@ -163,6 +174,20 @@ impl Config {
     /// denies every intent before the tool is called.
     pub fn with_required_scope(mut self, required: bool) -> Self {
         self.require_declared_scope = required;
+        self
+    }
+
+    /// Install the key used to sign ledger checkpoints. No checkpoints are
+    /// written unless a key is configured.
+    pub fn with_signing_key(mut self, key: redagent_signing::SigningKey) -> Self {
+        self.signing_key = Some(key);
+        self
+    }
+
+    /// Set the number of ledger events between signed checkpoints. A value of
+    /// zero disables checkpointing.
+    pub fn with_checkpoint_interval(mut self, interval: usize) -> Self {
+        self.checkpoint_interval = interval;
         self
     }
 }
@@ -381,8 +406,62 @@ fn run_with_planner<V: Verifier, A: ApprovalHandler + ?Sized, E: ToolExecutor>(
             reason: error.to_string(),
         })?;
     }
+    append_signed_checkpoints(config, &ledger).context("applying signed ledger checkpoints")?;
     result?;
     load_view(&config.ledger_path)
+}
+
+/// Append a checkpoint for every interval-marker event in the ledger.
+///
+/// The event list is snapshotted before any checkpoint is written, so the
+/// checkpoint events themselves can never trigger further checkpoints. Each
+/// signature covers the `hash` of the event at the checkpoint's `seq`, which
+/// lets [`redagent_core::verify_signed_checkpoints`] bind the signature to a
+/// concrete ledger position.
+fn append_signed_checkpoints(config: &Config, ledger: &Ledger) -> Result<()> {
+    let Some(key) = config.signing_key.as_ref() else {
+        return Ok(());
+    };
+    let interval = config.checkpoint_interval;
+    if interval == 0 {
+        tracing::warn!("checkpoint interval is zero; skipping signed checkpoints");
+        return Ok(());
+    }
+    let interval = i64::try_from(interval)
+        .with_context(|| format!("checkpoint interval {interval} is too large"))?;
+
+    let snapshot = ledger
+        .events()
+        .context("snapshotting ledger for signed checkpoints")?;
+    let mut appended = 0usize;
+    for event in &snapshot {
+        if event.seq <= 0 || event.seq % interval != 0 {
+            continue;
+        }
+        if matches!(event.body, EventBody::CheckpointSigned { .. }) {
+            continue;
+        }
+        let ts = chrono::Utc::now().to_rfc3339();
+        let checkpoint = key
+            .sign(event.seq, &event.hash, &ts)
+            .with_context(|| format!("signing checkpoint for ledger seq {}", event.seq))?;
+        ledger
+            .append(&EventBody::CheckpointSigned {
+                checkpoint: checkpoint.clone(),
+            })
+            .with_context(|| format!("appending signed checkpoint for ledger seq {}", event.seq))?;
+        tracing::info!(
+            seq = event.seq,
+            head_hash = %event.hash,
+            key_id = %checkpoint.key_id,
+            "appended signed ledger checkpoint"
+        );
+        appended += 1;
+    }
+    if appended > 0 {
+        tracing::info!(appended, "signed ledger checkpoints appended");
+    }
+    Ok(())
 }
 
 fn make_planner(config: &Config) -> Result<Box<dyn Planner>> {
@@ -1242,7 +1321,8 @@ mod tests {
         assert_eq!(effective_allowlist(&default, &catalog), ["redhands_health"]);
 
         // Empty: auto-admit only read-only, non-approval-gated live tools.
-        let auto = default.clone().with_allowed_tools(Vec::<String>::new());
+        let auto = Config::new("goal", PathBuf::from("unused"), dir.path().join("allow.db"))
+            .with_allowed_tools(Vec::<String>::new());
         assert_eq!(effective_allowlist(&auto, &catalog), ["redhands_health"]);
 
         // An explicit list is authoritative, even if it names a write tool.
@@ -1626,6 +1706,139 @@ mod tests {
             &event.body,
             EventBody::ScopeDenied { reason, .. } if reason.contains("allowlist")
         )));
+    }
+
+    #[test]
+    fn signed_checkpoints_are_appended_at_the_configured_interval() {
+        let dir = tempdir().unwrap();
+        let key = redagent_signing::SigningKey::generate().unwrap();
+        let public_hex = key.public_hex();
+        let config = Config::new(
+            "health check",
+            PathBuf::from("unused"),
+            dir.path().join("checkpoints.db"),
+        )
+        .with_signing_key(key)
+        .with_checkpoint_interval(2);
+        let mut executor = MockExecutor {
+            calls: Vec::new(),
+            gate: false,
+        };
+        let view = run_with_executor(&config, &HeuristicVerifier, &DenyAll, &mut executor).unwrap();
+
+        let events = ledger_events(&config);
+        let checkpoints: Vec<redagent_signing::Checkpoint> = events
+            .iter()
+            .filter_map(|event| match &event.body {
+                EventBody::CheckpointSigned { checkpoint } => Some(checkpoint.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            checkpoints.iter().map(|cp| cp.seq).collect::<Vec<_>>(),
+            [2, 4, 6, 8]
+        );
+        for checkpoint in &checkpoints {
+            let covered = events
+                .iter()
+                .find(|event| event.seq == checkpoint.seq)
+                .unwrap();
+            assert_eq!(checkpoint.head_hash, covered.hash);
+            assert!(redagent_signing::verify(checkpoint, &public_hex).unwrap());
+        }
+        assert_eq!(
+            redagent_core::verify_signed_checkpoints(&events, &public_hex).unwrap(),
+            4
+        );
+        assert_eq!(
+            Ledger::open(&config.ledger_path)
+                .unwrap()
+                .verify_chain()
+                .unwrap(),
+            events.len()
+        );
+
+        // The report exposes the checkpoints as a dedicated section.
+        assert_eq!(view.checkpoints.len(), 4);
+        let markdown = report_markdown(&config.ledger_path).unwrap();
+        assert!(markdown.contains("## Signed checkpoints"));
+        assert!(markdown.contains(&format!("| 2 | {} |", checkpoints[0].head_hash)));
+    }
+
+    #[test]
+    fn checkpoint_events_do_not_trigger_further_checkpoints() {
+        let dir = tempdir().unwrap();
+        let key = redagent_signing::SigningKey::generate().unwrap();
+        let config = Config::new(
+            "health check",
+            PathBuf::from("unused"),
+            dir.path().join("checkpoint-recursion.db"),
+        )
+        .with_signing_key(key)
+        .with_checkpoint_interval(1);
+        let mut executor = MockExecutor {
+            calls: Vec::new(),
+            gate: false,
+        };
+        run_with_executor(&config, &HeuristicVerifier, &DenyAll, &mut executor).unwrap();
+
+        let ledger = Ledger::open(&config.ledger_path).unwrap();
+        let events = ledger.events().unwrap();
+        // Eight engagement events plus exactly one checkpoint per event — not
+        // one per (engagement + checkpoint) event.
+        assert_eq!(events.len(), 16);
+        let covered: Vec<i64> = events
+            .iter()
+            .filter_map(|event| match &event.body {
+                EventBody::CheckpointSigned { checkpoint } => Some(checkpoint.seq),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(covered, [1, 2, 3, 4, 5, 6, 7, 8]);
+
+        // No checkpoint ever describes another checkpoint event.
+        assert!(covered.iter().all(|seq| *seq <= 8));
+        let public_hex = config.signing_key.as_ref().unwrap().public_hex();
+        assert_eq!(
+            redagent_core::verify_signed_checkpoints(&events, &public_hex).unwrap(),
+            8
+        );
+    }
+
+    #[test]
+    fn ledgers_without_checkpoints_still_parse_and_verify() {
+        let dir = tempdir().unwrap();
+        let config = Config::new(
+            "health check",
+            PathBuf::from("unused"),
+            dir.path().join("legacy.db"),
+        );
+        assert_eq!(config.checkpoint_interval, DEFAULT_CHECKPOINT_INTERVAL);
+        assert!(config.signing_key.is_none());
+
+        let mut executor = MockExecutor {
+            calls: Vec::new(),
+            gate: false,
+        };
+        let view = run_with_executor(&config, &HeuristicVerifier, &DenyAll, &mut executor).unwrap();
+        assert!(view.checkpoints.is_empty());
+
+        let events = ledger_events(&config);
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event.body, EventBody::CheckpointSigned { .. })));
+        assert_eq!(
+            redagent_core::verify_signed_checkpoints(&events, "not a public key").unwrap(),
+            0
+        );
+        let markdown = report_markdown(&config.ledger_path).unwrap();
+        assert!(!markdown.contains("## Signed checkpoints"));
+
+        // A ledger written before checkpoints existed still loads unchanged.
+        let replay = load_view(&config.ledger_path).unwrap();
+        assert_eq!(replay.goal, view.goal);
+        assert_eq!(replay.findings.len(), 1);
+        assert!(replay.completed);
     }
 
     #[test]

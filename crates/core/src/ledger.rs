@@ -7,6 +7,10 @@ use sha2::{Digest, Sha256};
 
 use crate::events::{EventBody, StoredEvent};
 
+/// Convenience re-export: checkpoint verification operates on events read from
+/// this ledger.
+pub use crate::events::verify_signed_checkpoints;
+
 const GENESIS_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
 /// Append-only, hash-chained event ledger backed by SQLite.
