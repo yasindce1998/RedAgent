@@ -57,6 +57,10 @@ struct Cli {
     command: Command,
 }
 
+// clap flattens each subcommand's arguments into one variant. The Run variant
+// legitimately carries many PathBuf/String options; boxing them would obscure
+// the CLI definition for a Windows-only layout warning.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Run an engagement against RedHands over MCP.
