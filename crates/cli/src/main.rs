@@ -343,6 +343,14 @@ fn write_json_pretty<T: Serialize>(path: &Path, value: &T, overwrite: bool) -> R
 }
 
 fn main() -> Result<()> {
+    // Set REDAGENT_LOG=debug (or trace) to inspect planner/worker spans.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_env("REDAGENT_LOG")
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .with_writer(std::io::stderr)
+        .try_init();
     let cli = Cli::parse();
     match cli.command {
         Command::Run {

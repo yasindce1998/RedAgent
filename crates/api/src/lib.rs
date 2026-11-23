@@ -598,6 +598,13 @@ pub fn router(state: AppState) -> Router {
 
 /// Bind the configured address and serve until the process is shut down.
 pub async fn serve(config: ApiConfig) -> anyhow::Result<()> {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_env("REDAGENT_LOG")
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .with_writer(std::io::stderr)
+        .try_init();
     let bind = config.bind;
     let app = router(AppState::new(config));
     let listener = tokio::net::TcpListener::bind(bind).await?;

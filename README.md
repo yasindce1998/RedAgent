@@ -33,7 +33,7 @@ RedHands exposes capabilities. RedAgent decides **what to try next**, remembers 
 | 🖥️ **Native + web control room** | Dioxus desktop and WASM web UIs share components; an Axum REST/SSE API streams projections and routes approvals — no Node, no database server. |
 | ⚡ **Two planes, one protocol** | Go stays where it shines (the tool plane); Rust owns the control plane and the native UI. One protocol between them: MCP. |
 
-> **Status:** v0.5.1 — tool-plane agnostic. An adapter manifest describes any MCP tool server's contract, and `redagent conformance` verifies it before use.
+> **Status:** v0.6.0 — resilient agent loop. Failed plans backtrack with structured memory and failure context, token budgets bound LLM spend, and `REDAGENT_LOG` exposes tracing spans.
 
 ## How it works
 
@@ -69,6 +69,16 @@ export REDAGENT_LLM_MODEL="your-model"
 The planner receives the real `tools/list` catalog, returns JSON-only intents, and every tool name, argument object and policy flag is validated before execution — a hallucinated tool never reaches RedHands. Malformed plans get exactly one retry, then abort into the ledger.
 
 `--toolsets` takes **toolset ids**, not install profiles (`nmap,vuln` = nmap + nuclei; `all` is not a valid value). Without `--allow-read-only` the guard permits only `redhands_health`; with it, the live catalog's read-only, non-gated tools are admitted automatically. Gated tools still require operator approval.
+
+### Resilient planning (v0.6.0)
+
+A rejected plan is recorded as a `PlanRejected` ledger event, then the planner
+is retried with a compact memory projection — target inventory, coverage,
+open findings and redacted credentials — plus the earlier failure reasons.
+Backtracking is bounded by `--replan-attempts` (default 1). Token budgets from
+`--max-llm-tokens` are enforced from the model's `usage` fields before any tool
+call. Set `REDAGENT_LOG=debug` (or `trace`) to see planner and worker spans on
+stderr.
 
 ### Approvals
 
