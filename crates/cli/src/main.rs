@@ -1,10 +1,13 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::Utc;
 use clap::{Parser, Subcommand};
 use redagent_app::{report_markdown, run, Config, LlmConfig};
+use redagent_conformance::{render_report, run_conformance, ConformanceReport};
+use redagent_contract::ToolServerManifest;
 use redagent_core::Ledger;
 use redagent_scope::{PolicyRule, Scope};
 use redagent_signing::{Checkpoint, SigningKey};
@@ -98,6 +101,9 @@ enum Command {
         /// JSON file declaring scope (cidrs/domains/ports), rules and target paths.
         #[arg(long)]
         scope_file: Option<PathBuf>,
+        /// Tool-server adapter manifest (defaults to the built-in RedHands encoding).
+        #[arg(long)]
+        manifest: Option<PathBuf>,
         /// Fail closed when no scope is declared.
         #[arg(long)]
         require_scope: bool,
@@ -109,6 +115,18 @@ enum Command {
         signing_key: Option<PathBuf>,
         #[arg(long, default_value_t = 50)]
         checkpoint_interval: usize,
+    },
+    /// Verify any MCP tool server against a RedAgent adapter manifest
+    Conformance {
+        /// Path to the tool server binary to probe over stdio.
+        #[arg(long)]
+        binary: PathBuf,
+        /// Adapter manifest (defaults to ToolServerManifest::redhands()).
+        #[arg(long)]
+        manifest: Option<PathBuf>,
+        /// Per-request timeout, in seconds.
+        #[arg(long, default_value_t = 15)]
+        timeout_secs: u64,
     },
     /// Export an engagement as SARIF, CycloneDX, MITRE Navigator or Markdown.
     Export {
@@ -270,6 +288,33 @@ pub fn anchor(
     Ok(checkpoint)
 }
 
+/// Probe a tool server with the conformance suite and print its report.
+///
+/// A missing `--manifest` selects the built-in RedHands adapter. The returned
+/// report is always `Ok` when the server could be spawned, including a failed
+/// verdict, so callers decide whether a failing report is fatal.
+pub fn conformance(
+    binary: &Path,
+    manifest_path: Option<&Path>,
+    timeout_secs: u64,
+) -> Result<ConformanceReport> {
+    let manifest = match manifest_path {
+        Some(path) => ToolServerManifest::from_file(path)
+            .with_context(|| format!("loading manifest from {}", path.display()))?,
+        None => ToolServerManifest::redhands(),
+    };
+    let report = run_conformance(
+        binary,
+        &[],
+        &[],
+        &manifest,
+        Duration::from_secs(timeout_secs),
+    )
+    .with_context(|| format!("running conformance against {}", binary.display()))?;
+    print!("{}", render_report(&report));
+    Ok(report)
+}
+
 /// Serialize `value` as pretty JSON at `path`, creating parent directories and
 /// refusing to replace an existing file unless `overwrite` is true.
 fn write_json_pretty<T: Serialize>(path: &Path, value: &T, overwrite: bool) -> Result<()> {
@@ -315,6 +360,7 @@ fn main() -> Result<()> {
             toolsets,
             allow_read_only,
             scope_file,
+            manifest,
             require_scope,
             no_injection_guard,
             signing_key,
@@ -327,6 +373,13 @@ fn main() -> Result<()> {
                 .with_required_scope(require_scope)
                 .with_injection_guard(!no_injection_guard)
                 .with_checkpoint_interval(checkpoint_interval);
+            if let Some(path) = manifest {
+                config =
+                    config
+                        .with_manifest(ToolServerManifest::from_file(&path).with_context(
+                            || format!("loading manifest from {}", path.display()),
+                        )?);
+            }
             if let Some(path) = signing_key {
                 config = config
                     .with_signing_key(SigningKey::from_file(&path).context("loading signing key")?);
@@ -351,6 +404,16 @@ fn main() -> Result<()> {
             }
             run(&config)?;
             print!("{}", report_markdown(&ledger)?);
+        }
+        Command::Conformance {
+            binary,
+            manifest,
+            timeout_secs,
+        } => {
+            let report = conformance(&binary, manifest.as_deref(), timeout_secs)?;
+            if !report.passed {
+                bail!("conformance check failed for {}", report.server);
+            }
         }
         Command::Export {
             ledger,
@@ -584,5 +647,86 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&output).expect("read rewritten anchor"))
                 .expect("parse rewritten anchor");
         assert_eq!(parsed, second);
+    }
+
+    #[test]
+    fn cli_parses_conformance_and_run_manifest_flags() {
+        let cli = Cli::try_parse_from([
+            "redagent",
+            "conformance",
+            "--binary",
+            "/bin/true",
+            "--timeout-secs",
+            "3",
+        ])
+        .expect("parse conformance subcommand");
+        match cli.command {
+            Command::Conformance {
+                binary,
+                manifest,
+                timeout_secs,
+            } => {
+                assert_eq!(binary, PathBuf::from("/bin/true"));
+                assert!(manifest.is_none());
+                assert_eq!(timeout_secs, 3);
+            }
+            other => panic!("unexpected subcommand: {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "redagent",
+            "run",
+            "a goal",
+            "--redhands",
+            "/bin/true",
+            "--manifest",
+            "adapter.json",
+        ])
+        .expect("parse run subcommand");
+        match cli.command {
+            Command::Run { manifest, .. } => {
+                assert_eq!(manifest, Some(PathBuf::from("adapter.json")));
+            }
+            other => panic!("unexpected subcommand: {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    fn silent_script(dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = dir.join("silent-server.sh");
+        fs::write(&path, "#!/bin/sh\nexit 0\n").expect("write script");
+        let mut permissions = fs::metadata(&path).expect("stat script").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&path, permissions).expect("make script executable");
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn conformance_reports_failed_verdict_for_silent_server() {
+        let dir = temp_dir();
+        let binary = silent_script(dir.path());
+        let report = conformance(&binary, None, 2).expect("spawn silent server");
+        assert!(!report.passed);
+        assert_eq!(report.server, "redhands");
+        assert!(report.checks.iter().any(|check| !check.passed));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn conformance_loads_manifest_from_file() {
+        let dir = temp_dir();
+        let binary = silent_script(dir.path());
+        let manifest_path = dir.path().join("manifest.json");
+        let mut manifest = ToolServerManifest::redhands();
+        manifest.name = "custom-server".to_string();
+        let file = fs::File::create(&manifest_path).expect("create manifest");
+        serde_json::to_writer(file, &manifest).expect("write manifest");
+
+        let report = conformance(&binary, Some(&manifest_path), 2).expect("spawn silent server");
+        assert_eq!(report.server, "custom-server");
+        assert!(!report.passed);
     }
 }

@@ -20,8 +20,11 @@ fn main() {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     let log = std::env::var("FAKE_MCP_LOG").ok();
-    let exit_before_response =
-        std::env::var("FAKE_MCP_MODE").ok().as_deref() == Some("exit_before_response");
+    let mode = std::env::var("FAKE_MCP_MODE").ok();
+    let exit_before_response = mode.as_deref() == Some("exit_before_response");
+    // `no_policy` advertises tools without the x-redhands-policy/annotations
+    // extension, so manifest normalization has to fail closed.
+    let no_policy = mode.as_deref() == Some("no_policy");
     let grant_once = std::env::var("FAKE_MCP_GRANT_ONCE").is_ok();
     let mut grant_used = false;
 
@@ -63,9 +66,9 @@ fn main() {
                     "protocolVersions": ["2026-07-28", "2025-03-26", "2024-11-05"]
                 })
             }
-            "tools/list" => json!({
-                "tools": [
-                    {
+            "tools/list" => {
+                let mut tools = vec![
+                    json!({
                         "name": "redhands_health",
                         "description": "Check RedHands health",
                         "inputSchema": {"type": "object", "properties": {}},
@@ -83,8 +86,8 @@ fn main() {
                             "idempotentHint": true,
                             "openWorldHint": false
                         }
-                    },
-                    {
+                    }),
+                    json!({
                         "name": "gated_echo",
                         "description": "Echo text after operator approval",
                         "inputSchema": {"type": "object", "properties": {}},
@@ -102,10 +105,18 @@ fn main() {
                             "idempotentHint": false,
                             "openWorldHint": false
                         }
+                    }),
+                ];
+                if no_policy {
+                    for tool in &mut tools {
+                        if let Some(object) = tool.as_object_mut() {
+                            object.remove("x-redhands-policy");
+                            object.remove("annotations");
+                        }
                     }
-                ],
-                "ttlMs": 300000
-            }),
+                }
+                json!({"tools": tools, "ttlMs": 300000})
+            }
             "tools/call" => {
                 let params = message.get("params");
                 let name = params

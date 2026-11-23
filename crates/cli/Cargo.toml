@@ -19,6 +19,8 @@ redagent-core = { path = "../core" }
 redagent-export = { path = "../export" }
 redagent-scope = { path = "../scope" }
 redagent-signing = { path = "../signing" }
+redagent-contract = { path = "../contract" }
+redagent-conformance = { path = "../conformance" }
 serde.workspace = true
 serde_json.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

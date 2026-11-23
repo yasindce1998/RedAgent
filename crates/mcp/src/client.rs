@@ -199,13 +199,36 @@ impl StdioMcpClient {
         Err(last_error.unwrap_or_else(|| anyhow!("all protocol versions failed")))
     }
 
-    pub fn tools_list(&mut self) -> Result<Vec<ToolInfo>> {
+    /// Return the undecoded entries from a `tools/list` response.
+    ///
+    /// Callers that need a schema other than RedHands' built-in [`ToolInfo`]
+    /// can feed these straight to `redagent_contract::normalize_tools`.
+    pub fn tools_list_raw(&mut self) -> Result<Vec<Value>> {
         let result = self.request("tools/list", json!({}))?;
         let tools = result
             .get("tools")
             .and_then(Value::as_array)
             .ok_or_else(|| anyhow!("tools/list response has no tools array"))?;
-        serde_json::from_value(Value::Array(tools.clone())).context("decoding tools/list response")
+        Ok(tools.clone())
+    }
+
+    pub fn tools_list(&mut self) -> Result<Vec<ToolInfo>> {
+        let tools = self.tools_list_raw()?;
+        serde_json::from_value(Value::Array(tools)).context("decoding tools/list response")
+    }
+
+    /// Normalize `tools/list` under a tool-server manifest.
+    ///
+    /// Unlike [`Self::tools_list`] this does not assume RedHands' policy
+    /// encoding: the manifest's JSON pointers decide where the safety signals
+    /// live, and absent signals fail closed.
+    pub fn tools_list_with_manifest(
+        &mut self,
+        manifest: &redagent_contract::ToolServerManifest,
+    ) -> Result<Vec<redagent_contract::NormalizedTool>> {
+        let tools = self.tools_list_raw()?;
+        redagent_contract::normalize_tools(&Value::Array(tools), manifest)
+            .context("normalizing tools/list response")
     }
 
     pub fn tools_call(&mut self, name: &str, arguments: Value) -> Result<ToolCallResult> {

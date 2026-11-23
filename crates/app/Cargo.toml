@@ -17,6 +17,7 @@ redagent-guard = { path = "../guard" }
 redagent-scope = { path = "../scope" }
 redagent-llm = { path = "../llm" }
 redagent-mcp = { path = "../mcp" }
+redagent-contract = { path = "../contract" }
 tracing.workspace = true
 
 [dev-dependencies]

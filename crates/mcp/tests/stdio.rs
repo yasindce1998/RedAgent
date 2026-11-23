@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::time::Duration;
 
+use redagent_contract::ToolServerManifest;
 use redagent_mcp::StdioMcpClient;
 
 fn fake_server() -> std::path::PathBuf {
@@ -163,4 +164,61 @@ fn unknown_tool_is_an_error() {
     assert!(client
         .tools_call("no_such_tool", serde_json::json!({}))
         .is_err());
+}
+
+#[test]
+fn tools_list_raw_returns_undecoded_entries() {
+    let mut client = client(&[]);
+    client.initialize().unwrap();
+    let raw = client.tools_list_raw().unwrap();
+    assert_eq!(raw.len(), 2);
+    assert_eq!(raw[0]["name"], "redhands_health");
+    // Raw entries still carry the server's own extension shape; `tools_list`
+    // flattens them, `tools_list_raw` deliberately does not.
+    assert_eq!(raw[0]["x-redhands-policy"]["readOnly"], true);
+    assert_eq!(raw[1]["x-redhands-policy"]["requiresApproval"], true);
+    assert!(raw[0]["inputSchema"].is_object());
+}
+
+#[test]
+fn tools_list_with_manifest_normalizes_redhands_tools() {
+    let mut client = client(&[]);
+    client.initialize().unwrap();
+    let tools = client
+        .tools_list_with_manifest(&ToolServerManifest::redhands())
+        .unwrap();
+    assert_eq!(tools.len(), 2);
+    assert_eq!(tools[0].name, "redhands_health");
+    assert_eq!(tools[0].description, "Check RedHands health");
+    assert!(tools[0].read_only);
+    assert!(!tools[0].requires_approval);
+    assert!(!tools[0].network_access);
+    assert!(tools[0].input_schema.is_object());
+
+    assert_eq!(tools[1].name, "gated_echo");
+    assert!(!tools[1].read_only);
+    assert!(tools[1].requires_approval);
+    assert!(!tools[1].network_access);
+}
+
+#[test]
+fn normalization_fails_closed_when_policy_fields_are_absent() {
+    let mut client = client(&[("FAKE_MCP_MODE", "no_policy")]);
+    client.initialize().unwrap();
+    let raw = client.tools_list_raw().unwrap();
+    assert!(raw
+        .iter()
+        .all(|tool| tool.get("x-redhands-policy").is_none()));
+
+    let tools = client
+        .tools_list_with_manifest(&ToolServerManifest::redhands())
+        .unwrap();
+    assert_eq!(tools.len(), 2);
+    for tool in &tools {
+        // No read-only pointers resolve ⇒ not read-only; no approval pointers
+        // resolve ⇒ approval required; no network pointers ⇒ no network.
+        assert!(!tool.read_only, "{}", tool.name);
+        assert!(tool.requires_approval, "{}", tool.name);
+        assert!(!tool.network_access, "{}", tool.name);
+    }
 }

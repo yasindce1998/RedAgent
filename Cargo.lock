@@ -5310,6 +5310,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "redagent-agent",
+ "redagent-contract",
  "redagent-core",
  "redagent-evidence",
  "redagent-guard",
@@ -5331,6 +5332,8 @@ dependencies = [
  "clap",
  "redagent-api",
  "redagent-app",
+ "redagent-conformance",
+ "redagent-contract",
  "redagent-core",
  "redagent-export",
  "redagent-scope",
@@ -5343,7 +5346,7 @@ dependencies = [
 
 [[package]]
 name = "redagent-conformance"
-version = "0.3.1"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "redagent-contract",
@@ -5353,7 +5356,7 @@ dependencies = [
 
 [[package]]
 name = "redagent-contract"
-version = "0.3.1"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -5419,6 +5422,7 @@ name = "redagent-mcp"
 version = "0.5.0"
 dependencies = [
  "anyhow",
+ "redagent-contract",
  "serde",
  "serde_json",
  "tempfile",
