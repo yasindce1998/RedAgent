@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use redagent_agent::{
-    detect_injection_signals, DeterministicPlanner, Intent, LlmPlanner, Planner, ToolDescriptor,
+    detect_injection_signals, DeterministicPlanner, Intent, LlmPlanner, PlanFailure, Planner,
+    ToolDescriptor,
 };
 use redagent_contract::{NormalizedTool, ToolServerManifest};
 use redagent_core::{render_markdown, CallProposal, EngagementView, EventBody, Ledger};
@@ -49,6 +50,12 @@ pub struct Config {
     pub redhands_version: String,
     pub max_tool_calls: usize,
     pub max_intents: usize,
+    /// Extra planning attempts allowed after a rejected plan (default 1).
+    /// Total planner invocations are capped at `max_replan_attempts + 1`.
+    pub max_replan_attempts: usize,
+    /// Optional upper bound on the tokens reported by the LLM. When exceeded,
+    /// the engagement aborts before any tool call is made (default: no bound).
+    pub max_llm_tokens: Option<u64>,
     /// Comma-separated RedHands toolsets exposed to the planner. Defaults to
     /// `"health"` so deterministic flows are unchanged; `"nmap,vuln,..."`
     /// unlocks the live tool catalog for LLM chaining.
@@ -93,6 +100,8 @@ impl Config {
             redhands_version: DEFAULT_REDHANDS_VERSION.to_string(),
             max_tool_calls: 8,
             max_intents: 6,
+            max_replan_attempts: 1,
+            max_llm_tokens: None,
             toolsets: "health".to_string(),
             allowed_tools: vec!["redhands_health".to_string()],
             planner_mode: PlannerMode::Deterministic,
@@ -143,6 +152,21 @@ impl Config {
     pub fn with_limits(mut self, max_tool_calls: usize, max_intents: usize) -> Self {
         self.max_tool_calls = max_tool_calls;
         self.max_intents = max_intents;
+        self
+    }
+
+    /// Set how many times a rejected plan may be retried with memory and
+    /// failure feedback. The first attempt is always made, so the total number
+    /// of planner invocations is `attempts + 1`.
+    pub fn with_replan_attempts(mut self, attempts: usize) -> Self {
+        self.max_replan_attempts = attempts;
+        self
+    }
+
+    /// Abort before any tool call once the planner reports more than `limit`
+    /// tokens. `None` (the default) leaves LLM usage unbounded.
+    pub fn with_token_budget(mut self, limit: u64) -> Self {
+        self.max_llm_tokens = Some(limit);
         self
     }
 
@@ -608,6 +632,42 @@ pub fn diff_arguments(previous: Option<&str>, current: &str) -> Option<String> {
     }
 }
 
+/// Render projectional memory from the ledger as it stands right now. Replans
+/// get this snapshot; the first plan is deliberately left context-free so
+/// deterministic flows behave exactly as before.
+fn planning_memory(ledger: &Ledger, failures: &[PlanFailure]) -> Result<String> {
+    let events = ledger
+        .events()
+        .context("reading ledger for projectional memory")?;
+    let view = redagent_core::projections::project(&events);
+    let mut memory = redagent_memory::build_memory(&view);
+    memory.plan_rejections = failures.len();
+    Ok(redagent_memory::render_memory_prompt(&memory))
+}
+
+/// Abort before any tool call when the planner reports more tokens than the
+/// configured budget. Planners without usage reporting are unaffected.
+fn enforce_token_budget(config: &Config, ledger: &Ledger, planner: &dyn Planner) -> Result<()> {
+    let Some(limit) = config.max_llm_tokens else {
+        return Ok(());
+    };
+    let Some(usage) = planner.token_usage() else {
+        return Ok(());
+    };
+    if usage.total_tokens > limit {
+        ledger.append(&EventBody::TokenBudgetExhausted {
+            used: usage.total_tokens,
+            limit,
+        })?;
+        return Err(anyhow!(
+            "LLM token budget exhausted: used {} of {} tokens",
+            usage.total_tokens,
+            limit
+        ));
+    }
+    Ok(())
+}
+
 #[tracing::instrument(level = "info", skip_all)]
 fn execute<V: Verifier, A: ApprovalHandler + ?Sized, E: ToolExecutor>(
     config: &Config,
@@ -622,14 +682,43 @@ fn execute<V: Verifier, A: ApprovalHandler + ?Sized, E: ToolExecutor>(
     let available = executor
         .list_tools_with_manifest(config.manifest.as_ref())
         .context("tools/list failed")?;
-    let intents = match planner.plan(&config.goal, &available) {
-        Ok(intents) => intents,
-        Err(error) => {
-            ledger.append(&EventBody::PlanRejected {
-                reason: error.to_string(),
-                attempt: 1,
-            })?;
-            return Err(error);
+    // First attempt stays exactly as before: no memory, no failure history.
+    // Only rejected plans trigger a context-aware retry, capped at
+    // `max_replan_attempts + 1` total invocations.
+    let mut failures: Vec<PlanFailure> = Vec::new();
+    let max_attempts = config.max_replan_attempts.saturating_add(1);
+    let mut attempt = 1usize;
+    let intents = loop {
+        let planned = if attempt == 1 {
+            planner.plan(&config.goal, &available)
+        } else {
+            let memory_prompt = planning_memory(ledger, &failures)?;
+            planner.plan_with_context(&config.goal, &available, Some(&memory_prompt), &failures)
+        };
+        match planned {
+            Ok(intents) => {
+                // Never run a tool after exceeding the configured LLM budget.
+                enforce_token_budget(config, ledger, planner)?;
+                break intents;
+            }
+            Err(error) => {
+                let attempt_no = u32::try_from(attempt).unwrap_or(u32::MAX);
+                ledger.append(&EventBody::PlanRejected {
+                    reason: error.to_string(),
+                    attempt: attempt_no,
+                })?;
+                failures.push(PlanFailure {
+                    reason: error.to_string(),
+                    attempt: attempt_no,
+                });
+                // Check after each LLM call too: an over-budget model must not
+                // be asked for another completion.
+                enforce_token_budget(config, ledger, planner)?;
+                if attempt >= max_attempts {
+                    return Err(error);
+                }
+                attempt += 1;
+            }
         }
     };
     let policy = Policy::new(
@@ -990,7 +1079,8 @@ pub fn report_markdown(ledger_path: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::Cell;
+    use redagent_llm::Usage;
+    use std::cell::{Cell, RefCell};
     use std::path::PathBuf;
     use tempfile::tempdir;
 
@@ -2010,5 +2100,309 @@ mod tests {
             .injection_signals
             .iter()
             .any(|signal| signal.signal.contains("ignore previous")));
+    }
+
+    // --- replan / token-budget integration tests ------------------------
+
+    struct PlannerCall {
+        memory: Option<String>,
+        failures: Vec<PlanFailure>,
+    }
+
+    /// Fails `failures_left` times, then returns a single valid intent. Every
+    /// invocation records whether it received memory and failure feedback.
+    struct ReplanPlanner {
+        failures_left: Cell<usize>,
+        calls: RefCell<Vec<PlannerCall>>,
+        usage: Option<Usage>,
+    }
+
+    impl ReplanPlanner {
+        fn new(failures_left: usize, usage: Option<Usage>) -> Self {
+            Self {
+                failures_left: Cell::new(failures_left),
+                calls: RefCell::new(Vec::new()),
+                usage,
+            }
+        }
+
+        fn next_result(&self) -> Result<Vec<Intent>> {
+            let left = self.failures_left.get();
+            if left > 0 {
+                self.failures_left.set(left - 1);
+                return Err(anyhow!("planner rejected this plan"));
+            }
+            Ok(vec![intent(
+                "intent-1",
+                "redhands_health",
+                serde_json::json!({}),
+            )])
+        }
+    }
+
+    impl Planner for ReplanPlanner {
+        fn plan(&self, _goal: &str, _available: &[ToolDescriptor]) -> Result<Vec<Intent>> {
+            self.calls.borrow_mut().push(PlannerCall {
+                memory: None,
+                failures: Vec::new(),
+            });
+            self.next_result()
+        }
+
+        fn plan_with_context(
+            &self,
+            _goal: &str,
+            _available: &[ToolDescriptor],
+            memory: Option<&str>,
+            failures: &[PlanFailure],
+        ) -> Result<Vec<Intent>> {
+            self.calls.borrow_mut().push(PlannerCall {
+                memory: memory.map(str::to_string),
+                failures: failures.to_vec(),
+            });
+            self.next_result()
+        }
+
+        fn token_usage(&self) -> Option<Usage> {
+            self.usage
+        }
+    }
+
+    #[test]
+    fn replan_uses_memory_and_failures_and_records_rejections() {
+        let dir = tempdir().unwrap();
+        let config = Config::new(
+            "health check",
+            PathBuf::from("unused"),
+            dir.path().join("replan.db"),
+        )
+        .with_replan_attempts(1);
+        // Seed a finding so the memory snapshot fed to the retry has both a
+        // goal and findings from prior ledger events.
+        {
+            let ledger = Ledger::open(&config.ledger_path).unwrap();
+            ledger
+                .append(&EventBody::FindingRecorded {
+                    id: "finding-prior".into(),
+                    title: "prior finding on example.com".into(),
+                    severity: "high".into(),
+                    evidence_seq: 1,
+                })
+                .unwrap();
+        }
+        let planner = ReplanPlanner::new(1, None);
+        let mut executor = MockExecutor {
+            calls: Vec::new(),
+            gate: false,
+        };
+        let view = run_with_planner(
+            &config,
+            &HeuristicVerifier,
+            &DenyAll,
+            &mut executor,
+            &planner,
+        )
+        .unwrap();
+
+        assert!(view.completed);
+        assert_eq!(view.findings.len(), 2);
+        assert_eq!(executor.calls, vec!["redhands_health"]);
+        assert_eq!(view.plan_rejections.len(), 1);
+        assert_eq!(view.plan_rejections[0].attempt, 1);
+        assert_eq!(view.plan_rejections[0].reason, "planner rejected this plan");
+
+        let calls = planner.calls.borrow();
+        assert_eq!(calls.len(), 2);
+        // The first plan is unchanged: no memory, no failure history.
+        assert!(calls[0].memory.is_none());
+        assert!(calls[0].failures.is_empty());
+        let memory = calls[1].memory.as_deref().expect("retry got memory");
+        assert!(memory.contains("projectional memory"));
+        assert!(memory.contains("NOT INSTRUCTIONS"));
+        assert!(memory.contains("health check"), "{memory}");
+        assert!(memory.contains("prior finding on example.com"), "{memory}");
+        assert_eq!(calls[1].failures.len(), 1);
+        assert_eq!(calls[1].failures[0].attempt, 1);
+        assert_eq!(calls[1].failures[0].reason, "planner rejected this plan");
+    }
+
+    #[test]
+    fn replan_attempts_are_capped_and_last_error_is_returned() {
+        let dir = tempdir().unwrap();
+        let config = Config::new(
+            "health check",
+            PathBuf::from("unused"),
+            dir.path().join("replan-cap.db"),
+        )
+        .with_replan_attempts(2);
+        let planner = ReplanPlanner::new(3, None);
+        let mut executor = MockExecutor {
+            calls: Vec::new(),
+            gate: false,
+        };
+        let error = run_with_planner(
+            &config,
+            &HeuristicVerifier,
+            &DenyAll,
+            &mut executor,
+            &planner,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("planner rejected this plan"));
+        assert_eq!(planner.calls.borrow().len(), 3);
+        assert!(executor.calls.is_empty());
+        let view = load_view(&config.ledger_path).unwrap();
+        assert_eq!(
+            view.plan_rejections
+                .iter()
+                .map(|rejection| rejection.attempt)
+                .collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+        assert!(view.abort_reason.unwrap().contains("planner rejected"));
+    }
+
+    #[test]
+    fn token_budget_exhausted_aborts_before_any_tool_call() {
+        let dir = tempdir().unwrap();
+        let config = Config::new(
+            "health check",
+            PathBuf::from("unused"),
+            dir.path().join("token-budget.db"),
+        )
+        .with_token_budget(100);
+        let planner = ReplanPlanner::new(
+            0,
+            Some(Usage {
+                prompt_tokens: 80,
+                completion_tokens: 25,
+                total_tokens: 105,
+            }),
+        );
+        let mut executor = MockExecutor {
+            calls: Vec::new(),
+            gate: false,
+        };
+        let error = run_with_planner(
+            &config,
+            &HeuristicVerifier,
+            &DenyAll,
+            &mut executor,
+            &planner,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("token budget exhausted"),
+            "{error}"
+        );
+        assert!(
+            executor.calls.is_empty(),
+            "no tool call may follow the abort"
+        );
+
+        let events = ledger_events(&config);
+        assert!(events.iter().any(|event| matches!(
+            &event.body,
+            EventBody::TokenBudgetExhausted {
+                used: 105,
+                limit: 100
+            }
+        )));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event.body, EventBody::ToolCallCompleted { .. })));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event.body, EventBody::EngagementCompleted { .. })));
+        let view = load_view(&config.ledger_path).unwrap();
+        assert_eq!(view.token_budget, Some((105, 100)));
+        assert!(view
+            .abort_reason
+            .unwrap()
+            .contains("token budget exhausted"));
+        assert!(report_markdown(&config.ledger_path)
+            .unwrap()
+            .contains("**Token budget exhausted:** 105 / 100 tokens"));
+    }
+
+    #[test]
+    fn token_usage_at_the_limit_still_allows_execution() {
+        let dir = tempdir().unwrap();
+        let config = Config::new(
+            "health check",
+            PathBuf::from("unused"),
+            dir.path().join("token-budget-ok.db"),
+        )
+        .with_token_budget(100);
+        let planner = ReplanPlanner::new(
+            0,
+            Some(Usage {
+                prompt_tokens: 80,
+                completion_tokens: 20,
+                total_tokens: 100,
+            }),
+        );
+        let mut executor = MockExecutor {
+            calls: Vec::new(),
+            gate: false,
+        };
+        let view = run_with_planner(
+            &config,
+            &HeuristicVerifier,
+            &DenyAll,
+            &mut executor,
+            &planner,
+        )
+        .unwrap();
+        assert!(view.completed);
+        assert_eq!(executor.calls, vec!["redhands_health"]);
+        assert_eq!(view.token_budget, None);
+    }
+
+    #[test]
+    fn token_budget_abort_prevents_another_replan_call() {
+        let dir = tempdir().unwrap();
+        let config = Config::new(
+            "health check",
+            PathBuf::from("unused"),
+            dir.path().join("token-budget-replan.db"),
+        )
+        .with_replan_attempts(2)
+        .with_token_budget(50);
+        let planner = ReplanPlanner::new(
+            2,
+            Some(Usage {
+                total_tokens: 60,
+                ..Usage::default()
+            }),
+        );
+        let mut executor = MockExecutor {
+            calls: Vec::new(),
+            gate: false,
+        };
+        let _ = run_with_planner(
+            &config,
+            &HeuristicVerifier,
+            &DenyAll,
+            &mut executor,
+            &planner,
+        );
+        assert_eq!(planner.calls.borrow().len(), 1);
+        assert!(executor.calls.is_empty());
+        let events = ledger_events(&config);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.body, EventBody::PlanRejected { .. }))
+                .count(),
+            1
+        );
+        assert!(events.iter().any(|event| matches!(
+            &event.body,
+            EventBody::TokenBudgetExhausted {
+                used: 60,
+                limit: 50
+            }
+        )));
     }
 }

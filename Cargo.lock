@@ -5326,6 +5326,7 @@ dependencies = [
  "redagent-guard",
  "redagent-llm",
  "redagent-mcp",
+ "redagent-memory",
  "redagent-scope",
  "redagent-signing",
  "serde_json",
