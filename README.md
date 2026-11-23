@@ -33,7 +33,7 @@ RedHands exposes capabilities. RedAgent decides **what to try next**, remembers 
 | 🖥️ **Native + web control room** | Dioxus desktop and WASM web UIs share components; an Axum REST/SSE API streams projections and routes approvals — no Node, no database server. |
 | ⚡ **Two planes, one protocol** | Go stays where it shines (the tool plane); Rust owns the control plane and the native UI. One protocol between them: MCP. |
 
-> **Status:** v0.5.0 — auditor-grade reporting. SARIF, CycloneDX, MITRE Navigator, branded HTML and a fixed/still-open/new retest diff, on top of signed evidence and the trust boundary.
+> **Status:** v0.5.1 — tool-plane agnostic. An adapter manifest describes any MCP tool server's contract, and `redagent conformance` verifies it before use.
 
 ## How it works
 
@@ -80,6 +80,19 @@ Gated RedHands tools return an inline `input_required` result. By default RedAge
 ```
 
 `--auto-approve` prints a loud warning and records `decided_by: auto-approve` in the ledger for every approval. Approval grants last exactly one tool call, matching RedHands' contract.
+
+### Any MCP tool server (v0.5.1)
+
+```sh
+redagent conformance --binary /path/to/any-mcp-server --timeout-secs 15
+redagent run "goal" --manifest my-server.json --redhands /path/to/server
+```
+
+A manifest declares protocol versions, capability flags and JSON pointers for
+policy fields (`readOnly`, `requiresApproval`, `networkAccess`). The conformance
+suite checks handshake, catalog shape, fail-closed normalization, a real tool
+call, error semantics and inline approvals. Unknown policy fields fail closed:
+a tool is never treated as read-only without an explicit signal.
 
 ### Signed evidence (v0.4.1)
 

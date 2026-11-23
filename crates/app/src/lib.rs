@@ -8,11 +8,12 @@ use anyhow::{anyhow, Context, Result};
 use redagent_agent::{
     detect_injection_signals, DeterministicPlanner, Intent, LlmPlanner, Planner, ToolDescriptor,
 };
+use redagent_contract::{NormalizedTool, ToolServerManifest};
 use redagent_core::{render_markdown, CallProposal, EngagementView, EventBody, Ledger};
 use redagent_evidence::EvidenceStore;
 use redagent_guard::{evaluate_call, CallContext, GuardEffect, Policy};
 use redagent_llm::LlmClient;
-use redagent_mcp::{StdioMcpClient, ToolCallResult};
+use redagent_mcp::{StdioMcpClient, ToolCallResult, ToolInfo};
 use redagent_scope::{extract_targets, PolicyRule, Scope, ScopeDecision};
 use serde_json::Value;
 
@@ -78,6 +79,9 @@ pub struct Config {
     /// Sign the ledger head every N events (default 50). Zero disables
     /// checkpointing even when a key is configured.
     pub checkpoint_interval: usize,
+    /// Declarative description of the tool server's policy encoding. `None`
+    /// keeps the built-in RedHands behavior for existing servers.
+    pub manifest: Option<ToolServerManifest>,
 }
 
 impl Config {
@@ -102,6 +106,7 @@ impl Config {
             injection_guard: true,
             signing_key: None,
             checkpoint_interval: DEFAULT_CHECKPOINT_INTERVAL,
+            manifest: None,
         }
     }
 
@@ -190,6 +195,13 @@ impl Config {
         self.checkpoint_interval = interval;
         self
     }
+
+    /// Install a tool-server manifest. Its policy pointers decide how the
+    /// advertised tools' safety metadata is normalized before planning.
+    pub fn with_manifest(mut self, manifest: ToolServerManifest) -> Self {
+        self.manifest = Some(manifest);
+        self
+    }
 }
 
 /// Abstraction over the MCP server so the engine is unit-testable without a
@@ -197,6 +209,19 @@ impl Config {
 pub trait ToolExecutor {
     fn initialize(&mut self) -> Result<String>;
     fn list_tools(&mut self) -> Result<Vec<ToolDescriptor>>;
+
+    /// List tools using a tool-server manifest when one is configured.
+    ///
+    /// The default ignores the manifest and delegates to [`Self::list_tools`],
+    /// so executors for existing servers keep working unchanged.
+    fn list_tools_with_manifest(
+        &mut self,
+        manifest: Option<&ToolServerManifest>,
+    ) -> Result<Vec<ToolDescriptor>> {
+        let _ = manifest;
+        self.list_tools()
+    }
+
     fn call_with_responses(
         &mut self,
         tool: &str,
@@ -206,6 +231,28 @@ pub trait ToolExecutor {
 
     fn call(&mut self, tool: &str, arguments: Value) -> Result<ToolCallResult> {
         self.call_with_responses(tool, arguments, None)
+    }
+}
+
+/// Convert the built-in MCP tool view into the planner's descriptor.
+fn descriptor_from_tool_info(tool: ToolInfo) -> ToolDescriptor {
+    ToolDescriptor {
+        name: tool.name,
+        description: tool.description,
+        input_schema: tool.input_schema,
+        read_only: tool.read_only,
+        requires_approval: tool.requires_approval,
+    }
+}
+
+/// Convert a manifest-normalized tool into the planner's descriptor.
+fn descriptor_from_normalized(tool: NormalizedTool) -> ToolDescriptor {
+    ToolDescriptor {
+        name: tool.name,
+        description: tool.description,
+        input_schema: tool.input_schema,
+        read_only: tool.read_only,
+        requires_approval: tool.requires_approval,
     }
 }
 
@@ -221,14 +268,23 @@ impl ToolExecutor for McpExecutor {
             .0
             .tools_list()?
             .into_iter()
-            .map(|tool| ToolDescriptor {
-                name: tool.name,
-                description: tool.description,
-                input_schema: tool.input_schema,
-                read_only: tool.read_only,
-                requires_approval: tool.requires_approval,
-            })
+            .map(descriptor_from_tool_info)
             .collect())
+    }
+
+    fn list_tools_with_manifest(
+        &mut self,
+        manifest: Option<&ToolServerManifest>,
+    ) -> Result<Vec<ToolDescriptor>> {
+        match manifest {
+            Some(manifest) => Ok(self
+                .0
+                .tools_list_with_manifest(manifest)?
+                .into_iter()
+                .map(descriptor_from_normalized)
+                .collect()),
+            None => self.list_tools(),
+        }
     }
 
     fn call_with_responses(
@@ -563,7 +619,9 @@ fn execute<V: Verifier, A: ApprovalHandler + ?Sized, E: ToolExecutor>(
     planner: &dyn Planner,
 ) -> Result<()> {
     executor.initialize().context("MCP initialize failed")?;
-    let available = executor.list_tools().context("tools/list failed")?;
+    let available = executor
+        .list_tools_with_manifest(config.manifest.as_ref())
+        .context("tools/list failed")?;
     let intents = match planner.plan(&config.goal, &available) {
         Ok(intents) => intents,
         Err(error) => {
@@ -1042,6 +1100,72 @@ mod tests {
         assert_eq!(executor.calls.len(), 1);
         let view = load_view(&config.ledger_path).unwrap();
         assert!(view.abort_reason.unwrap().contains("approval denied"));
+    }
+
+    /// Records whether `execute` forwarded the configured manifest.
+    struct ManifestRecordingExecutor {
+        saw_manifest: Cell<Option<bool>>,
+    }
+
+    impl ToolExecutor for ManifestRecordingExecutor {
+        fn initialize(&mut self) -> Result<String> {
+            Ok("2026-07-28".to_string())
+        }
+        fn list_tools(&mut self) -> Result<Vec<ToolDescriptor>> {
+            Ok(vec![ToolDescriptor::new(
+                "redhands_health",
+                "health",
+                serde_json::json!({"type": "object"}),
+            )
+            .with_policy(true, false)])
+        }
+        fn list_tools_with_manifest(
+            &mut self,
+            manifest: Option<&ToolServerManifest>,
+        ) -> Result<Vec<ToolDescriptor>> {
+            self.saw_manifest.set(Some(manifest.is_some()));
+            self.list_tools()
+        }
+        fn call_with_responses(
+            &mut self,
+            _tool: &str,
+            _arguments: Value,
+            _input_responses: Option<Value>,
+        ) -> Result<ToolCallResult> {
+            Ok(ToolCallResult {
+                content: "### Status: OK".to_string(),
+                is_error: false,
+                result_type: None,
+                input_requests: None,
+            })
+        }
+    }
+
+    #[test]
+    fn execute_forwards_configured_manifest_to_executor() {
+        let dir = tempdir().unwrap();
+        let config = Config::new(
+            "health check",
+            PathBuf::from("unused"),
+            dir.path().join("no-manifest.db"),
+        );
+        let mut executor = ManifestRecordingExecutor {
+            saw_manifest: Cell::new(None),
+        };
+        run_with_executor(&config, &HeuristicVerifier, &DenyAll, &mut executor).unwrap();
+        assert_eq!(executor.saw_manifest.get(), Some(false));
+
+        let config = Config::new(
+            "health check",
+            PathBuf::from("unused"),
+            dir.path().join("with-manifest.db"),
+        )
+        .with_manifest(ToolServerManifest::redhands());
+        let mut executor = ManifestRecordingExecutor {
+            saw_manifest: Cell::new(None),
+        };
+        run_with_executor(&config, &HeuristicVerifier, &DenyAll, &mut executor).unwrap();
+        assert_eq!(executor.saw_manifest.get(), Some(true));
     }
 
     /// Executor that returns a scripted content string per call.

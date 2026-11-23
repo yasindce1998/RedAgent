@@ -9,6 +9,7 @@ authors.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+redagent-contract = { path = "../contract" }
 
 [dev-dependencies]
 tempfile.workspace = true
