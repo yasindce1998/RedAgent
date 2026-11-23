@@ -123,6 +123,12 @@ pub enum EventBody {
         reason: String,
         attempt: u32,
     },
+    /// The configured LLM token budget was exceeded. No tool call may follow
+    /// this event: it is appended before the engine runs the accepted plan.
+    TokenBudgetExhausted {
+        used: u64,
+        limit: u64,
+    },
     /// An Ed25519 signature binding `checkpoint.seq` and the ledger head hash
     /// at that sequence. Checkpoints are appended after an engagement ends and
     /// are inert with respect to all projections.
@@ -160,6 +166,7 @@ const KNOWN_KINDS: &[&str] = &[
     "scope_denied",
     "injection_signal",
     "plan_rejected",
+    "token_budget_exhausted",
     "checkpoint_signed",
 ];
 
@@ -253,6 +260,10 @@ enum KnownEventBody {
     PlanRejected {
         reason: String,
         attempt: u32,
+    },
+    TokenBudgetExhausted {
+        used: u64,
+        limit: u64,
     },
     CheckpointSigned {
         checkpoint: redagent_signing::Checkpoint,
@@ -388,6 +399,9 @@ impl From<KnownEventBody> for EventBody {
             KnownEventBody::PlanRejected { reason, attempt } => {
                 Self::PlanRejected { reason, attempt }
             }
+            KnownEventBody::TokenBudgetExhausted { used, limit } => {
+                Self::TokenBudgetExhausted { used, limit }
+            }
             KnownEventBody::CheckpointSigned { checkpoint } => {
                 Self::CheckpointSigned { checkpoint }
             }
@@ -473,6 +487,7 @@ impl EventBody {
             Self::ScopeDenied { .. } => "scope_denied",
             Self::InjectionSignal { .. } => "injection_signal",
             Self::PlanRejected { .. } => "plan_rejected",
+            Self::TokenBudgetExhausted { .. } => "token_budget_exhausted",
             Self::CheckpointSigned { .. } => "checkpoint_signed",
             // The original tag is preserved in `event_kind`.
             Self::Unknown { .. } => "unknown",
@@ -896,6 +911,10 @@ mod tests {
                 reason: "r".into(),
                 attempt: 1,
             },
+            EventBody::TokenBudgetExhausted {
+                used: 1200,
+                limit: 1000,
+            },
             EventBody::CheckpointSigned {
                 checkpoint: test_checkpoint(5),
             },
@@ -1071,5 +1090,21 @@ mod tests {
                 other => panic!("expected ApprovalRequested, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn token_budget_exhausted_round_trips_with_counters() {
+        let body = EventBody::TokenBudgetExhausted {
+            used: 4321,
+            limit: 4000,
+        };
+        assert_eq!(body.kind(), "token_budget_exhausted");
+        let json = serde_json::to_string(&body).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["kind"], "token_budget_exhausted");
+        assert_eq!(value["used"], 4321);
+        assert_eq!(value["limit"], 4000);
+        assert_eq!(serde_json::from_str::<EventBody>(&json).unwrap(), body);
+        assert_eq!(EventBody::from_payload(&json).unwrap(), body);
     }
 }

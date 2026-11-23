@@ -5316,6 +5316,7 @@ dependencies = [
  "redagent-guard",
  "redagent-llm",
  "redagent-mcp",
+ "redagent-memory",
  "redagent-scope",
  "redagent-signing",
  "serde_json",
@@ -5430,7 +5431,7 @@ dependencies = [
 
 [[package]]
 name = "redagent-memory"
-version = "0.3.1"
+version = "0.5.1"
 dependencies = [
  "redagent-core",
  "serde",
