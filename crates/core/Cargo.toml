@@ -13,3 +13,4 @@ sha2.workspace = true
 hex.workspace = true
 rusqlite.workspace = true
 chrono.workspace = true
+redagent-signing = { path = "../signing" }

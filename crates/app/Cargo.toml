@@ -8,7 +8,9 @@ authors.workspace = true
 [dependencies]
 anyhow.workspace = true
 serde_json.workspace = true
+chrono.workspace = true
 redagent-core = { path = "../core" }
+redagent-signing = { path = "../signing" }
 redagent-evidence = { path = "../evidence" }
 redagent-agent = { path = "../agent" }
 redagent-guard = { path = "../guard" }
