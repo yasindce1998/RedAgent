@@ -1,16 +1,16 @@
-# RedAgent v0.5.0
+# RedAgent v0.5.1
 
-Auditor-grade reporting on top of the signed, scope-enforced evidence chain.
+Tool-plane agnostic adapter layer and conformance suite.
 
-- **HTML export** — self-contained branded dossier with inline CSS, responsive layout, findings/verification/evidence sections and MITRE technique chips; every untrusted string is HTML-escaped
-- **Retest diff** — `redagent retest --against baseline.db --ledger current.db` reports fixed / still-open / new findings in Markdown or JSON
-- **MITRE Navigator layer** — now driven by `T####` IDs extracted from finding titles and tool output
-- **SARIF 2.1.0 / CycloneDX 1.5** gains from the earlier hardening pass remain available
-- API exports accept `html`; the Dioxus UI exposes an HTML export card
+- **`redagent-contract`** — manifest describing protocol versions, capabilities, approval semantics and JSON pointers to a tool server's policy fields; `ToolServerManifest::redhands()` ships the built-in profile; normalization fails closed when policy fields are absent
+- **`redagent-conformance`** — seven-check verification of handshake, catalog, schema, read-only signals, a real tool call, error semantics and inline approvals
+- **`redagent conformance --binary <path> [--manifest <file>]`** — run the suite against any MCP tool server, with a Markdown pass/fail report
+- **`redagent run --manifest <file>`** — normalize the live catalog through the adapter manifest before planning
+- Verified live against the checksum-pinned RedHands v0.6.3 release: 7/7 checks, 287 tools normalized
 
 Contract version: **RedHands v0.6.3**. MIT licensed. Authorized engagements only.
 
 ```sh
 sha256sum -c SHA256SUMS
-./redagent_0.5.0/redagent --version   # redagent 0.5.0
+./redagent_0.5.1/redagent --version   # redagent 0.5.1
 ```
