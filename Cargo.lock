@@ -5325,14 +5325,17 @@ name = "redagent-cli"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "redagent-api",
  "redagent-app",
  "redagent-core",
  "redagent-export",
  "redagent-scope",
+ "redagent-signing",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 
